@@ -65,7 +65,7 @@ MIDDLEWARE = [
 CORS_ALLOWED_ORIGINS = [
     "http://192.168.3.72:8086",  # 前端访问地址1
     "http://192.168.3.61:8086",  # 前端访问地址2
-    "http://60.205.199.162:7010",  # 服务器地址，待更新
+    "http://60.205.199.162:8007",  # 服务器地址，待更新
 ]
 
 # 允许的 HTTP 方法
@@ -114,35 +114,39 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'config.wsgi.application'
-
-# 默认连接片剂药物智能排程系统的远程 MySQL 数据库。
-# 仍保留 DB_ENGINE=sqlite 覆盖能力，便于本地隔离测试。
-DB_ENGINE = os.getenv('DB_ENGINE', 'mysql').lower()
-if DB_ENGINE in {'mysql', 'django.db.backends.mysql'}:
+# ==========================================
+# Database - MySQL配置（支持环境变量）
+# ==========================================
+DB_ENGINE = os.getenv('DB_ENGINE', 'django.db.backends.mysql')
+try:
     import pymysql
+
     pymysql.install_as_MySQLdb()
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.mysql',
-            'NAME': os.getenv('DB_NAME', 'tdsms'),
-            'USER': os.getenv('DB_USER', 'root'),
-            'PASSWORD': os.getenv('DB_PASSWORD', 'bjtu@8401A'),
-            # 通过 SSH 本地端口转发连接远程 MySQL：
-            # ssh -N -L 13310:127.0.0.1:3310 root@60.205.199.162
-            'HOST': os.getenv('DB_HOST', '127.0.0.1'),
-            'PORT': os.getenv('DB_PORT', '13310'),
-            'CONN_MAX_AGE': 600,
-            'CONN_HEALTH_CHECKS': True,
-            'OPTIONS': {'charset': 'utf8mb4', 'init_command': "SET sql_mode='STRICT_TRANS_TABLES'"},
-        }
+except Exception:
+    pass
+DATABASES = {
+    'default': {
+        'ENGINE': DB_ENGINE, 
+        'NAME': os.getenv('DB_NAME', 'tdsms'),
+        'USER': os.getenv('DB_USER', 'root'),
+        'PASSWORD': os.getenv('DB_PASSWORD', 'bjtu@8401A'),
+        'HOST': os.getenv('DB_HOST', '60.205.199.162'),
+        'PORT': os.getenv('DB_PORT', '3310'),
+
+            # ===== 连接池与断线重连 =====
+        'CONN_MAX_AGE': 600,
+
+        'CONN_HEALTH_CHECKS': True,
+
+        'OPTIONS': {
+            'charset': 'utf8mb4',
+            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+            'connect_timeout': 10,
+            # Excel 大批量导入使用 LOAD DATA LOCAL INFILE
+            'local_infile': True,
+        },
     }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
+}
 
 # Internationalization
 LANGUAGE_CODE = 'zh-hans'
