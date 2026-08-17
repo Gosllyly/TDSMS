@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+db.sqlite3
+media/*
+!media/.gitkeep
+!media/templates/
+!media/templates/**
+algorithm_logs/
+tmp/
+logs/*.log*
+logs/refresh/
+*.sqlite3-journal
+
+# 临时交互说明、算法交付包及模板源文件不提交；运行所需文件复制到正式目录。
+交互说明及模板文件/

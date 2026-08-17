@@ -1,4 +1,6 @@
 from datetime import timedelta
+import hmac
+from uuid import uuid4
 
 import jwt
 from django.conf import settings
@@ -14,7 +16,7 @@ class Authentication(authentication.BaseAuthentication):
 
     def authenticate(self, request):
         path = (request.path or "").rstrip("/")
-        if path.endswith("/ivsms/auth/login"):
+        if path.endswith("/tdsms/auth/login"):
             return None
 
         auth_header = authentication.get_authorization_header(request).decode("utf-8")
@@ -24,12 +26,9 @@ class Authentication(authentication.BaseAuthentication):
         if len(parts) != 2 or parts[0] != self.keyword:
             raise AuthenticationFailed("登录状态已失效，请重新登录")
 
+        token = parts[1]
         try:
-            payload = jwt.decode(
-                parts[1],
-                settings.JWT_SECRET_KEY,
-                algorithms=[settings.JWT_ALGORITHM],
-            )
+            payload = decode_jwt_token(token)
         except jwt.PyJWTError as exc:
             raise AuthenticationFailed("登录状态已失效，请重新登录") from exc
 
@@ -42,9 +41,27 @@ class Authentication(authentication.BaseAuthentication):
             raise AuthenticationFailed("登录状态已失效，请重新登录")
         if user.expireTime and user.expireTime < timezone.now():
             raise AuthenticationFailed("登录状态已失效，请重新登录")
-        if not user.token or user.token != parts[1]:
+        if not user.loginToken or not hmac.compare_digest(user.loginToken, token):
             raise AuthenticationFailed("登录状态已失效，请重新登录")
-        return user, payload
+        return user, token
+
+
+def decode_jwt_token(token):
+    return jwt.decode(
+        token,
+        settings.JWT_SECRET_KEY,
+        algorithms=[settings.JWT_ALGORITHM],
+    )
+
+
+def is_valid_login_token(user, token):
+    if not token:
+        return False
+    try:
+        payload = decode_jwt_token(token)
+    except jwt.PyJWTError:
+        return False
+    return payload.get("userId") == user.userId
 
 
 def build_jwt_for_user(user):
@@ -52,6 +69,7 @@ def build_jwt_for_user(user):
     payload = {
         "userId": user.userId,
         "username": user.username,
+        "jti": uuid4().hex,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)).timestamp()),
     }

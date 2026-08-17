@@ -11,12 +11,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # 自建任务上传文件根目录（可通过环境变量覆盖）位于项目的外层目录
 TASK_UPLOAD_ROOT = os.getenv(
     'TASK_UPLOAD_ROOT',
-    os.getenv('SELF_BUILD_UPLOAD_ROOT', os.path.join(BASE_DIR.parent, 'create_task_uploads')),
+    os.getenv('SELF_BUILD_UPLOAD_ROOT', os.path.join(BASE_DIR, 'media', 'task_uploads')),
 )
 SELF_BUILD_UPLOAD_ROOT = TASK_UPLOAD_ROOT
 RESULT_EXCEL_ROOT = os.getenv(
     'RESULT_EXCEL_ROOT',
-    os.path.join(BASE_DIR.parent, 'results_excel'),
+    os.path.join(BASE_DIR, 'media', 'results_excel'),
 )
 
 # ==========================================
@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',#一次性消息通知系统（admin 依赖它）。
     'django.contrib.staticfiles',#管理 CSS/JS 文件的系统（admin 依赖它）。
     'rest_framework',
+    'corsheaders',
     'core',
     'api',
 ]
@@ -51,6 +52,7 @@ AUTHENTICATION_BACKENDS = [
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -113,40 +115,34 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-# ==========================================
-# Database - MySQL配置（支持环境变量）
-# ==========================================
-DB_ENGINE = os.getenv('DB_ENGINE', 'django.db.backends.mysql')
-try:
+# 默认连接片剂药物智能排程系统的远程 MySQL 数据库。
+# 仍保留 DB_ENGINE=sqlite 覆盖能力，便于本地隔离测试。
+DB_ENGINE = os.getenv('DB_ENGINE', 'mysql').lower()
+if DB_ENGINE in {'mysql', 'django.db.backends.mysql'}:
     import pymysql
-
     pymysql.install_as_MySQLdb()
-except Exception:
-    pass
-
-DATABASES = {
-    'default': {
-        'ENGINE': DB_ENGINE,
-        'NAME': os.getenv('DB_NAME', 'tdsms'),
-        'USER': os.getenv('DB_USER', 'root'),
-        'PASSWORD': os.getenv('DB_PASSWORD', 'bjtu@8401A'),
-        'HOST': os.getenv('DB_HOST', '60.205.199.162'),
-        'PORT': os.getenv('DB_PORT', '3310'),
-
-            # ===== 连接池与断线重连 =====
-        'CONN_MAX_AGE': 600,
-
-        'CONN_HEALTH_CHECKS': True,
-
-        'OPTIONS': {
-            'charset': 'utf8mb4',
-            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-            'connect_timeout': 10,
-            # Excel 大批量导入使用 LOAD DATA LOCAL INFILE
-            'local_infile': True,
-        },
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.mysql',
+            'NAME': os.getenv('DB_NAME', 'tdsms'),
+            'USER': os.getenv('DB_USER', 'root'),
+            'PASSWORD': os.getenv('DB_PASSWORD', 'bjtu@8401A'),
+            # 通过 SSH 本地端口转发连接远程 MySQL：
+            # ssh -N -L 13310:127.0.0.1:3310 root@60.205.199.162
+            'HOST': os.getenv('DB_HOST', '127.0.0.1'),
+            'PORT': os.getenv('DB_PORT', '13310'),
+            'CONN_MAX_AGE': 600,
+            'CONN_HEALTH_CHECKS': True,
+            'OPTIONS': {'charset': 'utf8mb4', 'init_command': "SET sql_mode='STRICT_TRANS_TABLES'"},
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 # Internationalization
 LANGUAGE_CODE = 'zh-hans'
@@ -191,6 +187,15 @@ JWT_EXPIRE_MINUTES = int(os.getenv('JWT_EXPIRE_MINUTES', str(24 * 60)))
 USE_MOCK_ALGORITHM = os.getenv('USE_MOCK_ALGORITHM', 'false').lower() in {'1', 'true', 'yes', 'on'}
 ALGORITHM_SERVICE_URL = os.getenv('ALGORITHM_SERVICE_URL', 'http://127.0.0.1:9000')
 ALGORITHM_TIMEOUT_SECONDS = int(os.getenv('ALGORITHM_TIMEOUT_SECONDS', '30'))
+ALGORITHM_LOG_ROOT = os.getenv('ALGORITHM_LOG_ROOT', os.path.join(BASE_DIR, 'algorithm_logs'))
+ALGORITHM_RUN_ROOT = os.getenv(
+    'ALGORITHM_RUN_ROOT',
+    os.path.join(BASE_DIR, 'media', 'algorithm_runs'),
+)
+ALGORITHM_INPUT_ROOT = os.getenv(
+    'ALGORITHM_INPUT_ROOT',
+    os.path.join(BASE_DIR, 'media', 'algorithm_inputs'),
+)
 # 同时进行中的求解子进程上限；默认等于 CPU 核数，可用环境变量覆盖
 _MAX_CONCURRENT_SOLVES_ENV = os.getenv('MAX_CONCURRENT_SOLVES', '').strip()
 MAX_CONCURRENT_SOLVES = (
@@ -215,7 +220,7 @@ MAX_CONCURRENT_SOLVES = (
 
 # 日志目录
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
-REFRESH_LOG_DIR = os.path.join(BASE_DIR.parent, 'refresh_logs')
+REFRESH_LOG_DIR = os.getenv('REFRESH_LOG_DIR', os.path.join(BASE_DIR, 'logs', 'refresh'))
 os.makedirs(REFRESH_LOG_DIR, exist_ok=True)
 
 # 根据 DEBUG 模式决定使用哪些 handler
