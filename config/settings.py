@@ -8,11 +8,12 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# 自建任务上传文件根目录（可通过环境变量覆盖）位于项目的外层目录
+# 上传文件根目录（可通过环境变量覆盖），位于 tdsms 项目的同级目录
 TASK_UPLOAD_ROOT = os.getenv(
     'TASK_UPLOAD_ROOT',
-    os.getenv('SELF_BUILD_UPLOAD_ROOT', os.path.join(BASE_DIR, 'media', 'task_uploads')),
+    os.getenv('SELF_BUILD_UPLOAD_ROOT', str(BASE_DIR.parent / 'task_uploads')),
 )
+os.makedirs(TASK_UPLOAD_ROOT, exist_ok=True)
 SELF_BUILD_UPLOAD_ROOT = TASK_UPLOAD_ROOT
 RESULT_EXCEL_ROOT = os.getenv(
     'RESULT_EXCEL_ROOT',
@@ -194,8 +195,9 @@ ALGORITHM_TIMEOUT_SECONDS = int(os.getenv('ALGORITHM_TIMEOUT_SECONDS', '30'))
 ALGORITHM_LOG_ROOT = os.getenv('ALGORITHM_LOG_ROOT', os.path.join(BASE_DIR, 'algorithm_logs'))
 ALGORITHM_RUN_ROOT = os.getenv(
     'ALGORITHM_RUN_ROOT',
-    os.path.join(BASE_DIR, 'media', 'algorithm_runs'),
+    str(BASE_DIR.parent / 'algorithm_runs'),
 )
+os.makedirs(ALGORITHM_RUN_ROOT, exist_ok=True)
 ALGORITHM_INPUT_ROOT = os.getenv(
     'ALGORITHM_INPUT_ROOT',
     os.path.join(BASE_DIR, 'media', 'algorithm_inputs'),

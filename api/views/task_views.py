@@ -37,9 +37,32 @@ def plan_item_data(item):
     }
 
 
+PLAN_FILTER_FIELDS = {
+    "departmentNames": "departmentName",
+    "monthlyProductionPlans": "monthlyProductionPlan",
+    "inventoryNames": "inventoryName",
+}
+
+
+def apply_plan_item_filters(queryset, params, skip_option=None):
+    for option, field_name in PLAN_FILTER_FIELDS.items():
+        if option == skip_option:
+            continue
+        values = params.get(option) or []
+        if not isinstance(values, (list, tuple)):
+            values = [values]
+        if not values:
+            continue
+        try:
+            queryset = queryset.filter(**{f"{field_name}__in": values})
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("筛选条件格式不正确") from exc
+    return queryset
+
+
 class TaskTemplateView(APIView):
     def get(self, request):
-        path = Path(settings.MEDIA_ROOT) / "templates" / "药业车间分解编排计划表模板.xlsx"
+        path = Path(settings.MEDIA_ROOT) / "templates" / "药业车间分解编排计划模板.xlsx"
         return attachment_file_response(open(path, "rb"), path.name)
 
 
@@ -118,38 +141,19 @@ class TaskDetailView(APIView):
         if keyword:
             queryset = queryset.filter(Q(materialCode__icontains=keyword) | Q(inventoryName__icontains=keyword) | Q(specification__icontains=keyword))
 
-        filters = {
-            "departmentName__in": params.get("departmentNames") or [],
-            "monthlyProductionPlan__in": params.get("monthlyProductionPlans") or [],
-            "inventoryName__in": params.get("inventoryNames") or [],
-        }
-        for field_lookup, values in filters.items():
-            if not isinstance(values, (list, tuple)):
-                values = [values]
-            if values:
-                try:
-                    queryset = queryset.filter(**{field_lookup: values})
-                except (TypeError, ValueError) as exc:
-                    raise ValidationError("筛选条件格式不正确") from exc
-
+        queryset = apply_plan_item_filters(queryset, params)
         total, records, page, page_size = paginate(queryset, params.get("page"), params.get("pageSize"))
         return ApiResponse({"total": total, "page": page, "pageSize": page_size, "records": [plan_item_data(x) for x in records]}, message="查询成功")
 
 
 class TaskDetailFilterOptionsView(APIView):
-    OPTION_FIELDS = {
-        "departmentNames": "departmentName",
-        "monthlyProductionPlans": "monthlyProductionPlan",
-        "inventoryNames": "inventoryName",
-    }
-
-    def get(self, request):
+    def post(self, request):
         params = get_request_params(request)
         task_id = params.get("taskId")
         option = params.get("option")
         if not task_id:
             raise ValidationError("taskId不能为空")
-        if option not in self.OPTION_FIELDS:
+        if option not in PLAN_FILTER_FIELDS:
             raise ValidationError(
                 "option必须为departmentNames、monthlyProductionPlans或inventoryNames"
             )
@@ -160,8 +164,9 @@ class TaskDetailFilterOptionsView(APIView):
         if not task:
             raise NotFound("任务记录不存在")
 
-        field_name = self.OPTION_FIELDS[option]
+        field_name = PLAN_FILTER_FIELDS[option]
         queryset = UploadFileItem.objects.filter(file=task.file, isDeleted=0)
+        queryset = apply_plan_item_filters(queryset, params, skip_option=option)
         queryset = queryset.exclude(**{f"{field_name}__isnull": True})
         if field_name in {"departmentName", "inventoryName"}:
             queryset = queryset.exclude(**{field_name: ""})

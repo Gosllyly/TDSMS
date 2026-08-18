@@ -14,6 +14,19 @@ from postprocess_sunday_calendar import postprocess_detail_for_sundays
 from solve_progress_logger import CpSearchProgressCallback, ScheduleSolveProgressLogger
 
 
+def _remaining_seconds(deadline_monotonic):
+    if deadline_monotonic is None:
+        return None
+    return max(0.0, deadline_monotonic - time.monotonic())
+
+
+def _stage_budget(planned, deadline_monotonic):
+    left = _remaining_seconds(deadline_monotonic)
+    if left is None:
+        return max(0.0, float(planned))
+    return max(0.0, min(float(planned), left))
+
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -102,9 +115,29 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
     minor_cleaning_time_override=None,
     periodic_cleaning_time=1.0,
     stop_checker=None,
+    user_stop_checker=None,
+    deadline_monotonic=None,
     department="210车间",
     result_exporter=None,
 ):
+    if stop_checker is not None and stop_checker():
+        is_user_stop = user_stop_checker is None or user_stop_checker()
+        if is_user_stop:
+            progress_logger.on_stop_requested()
+        else:
+            progress_logger.on_time_limit()
+        return {
+            "alns_objective": None,
+            "final_objective": None,
+            "final_seed": None,
+            "cp_status": "UNKNOWN",
+            "stopped": is_user_stop,
+            "timed_out": not is_user_stop,
+            "result_ready": False,
+            "files_exported": False,
+            "stop_stage": "initial",
+        }
+
     print("1. 读取输入数据...")
     (
         I, J1, J2, J3, J4, B, p1, p2, p3, p4, p5, d, T, w,
@@ -138,18 +171,6 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
     }
 
     t0 = time.time()
-    if stop_checker is not None and stop_checker():
-        progress_logger.on_stop_requested()
-        return {
-            "alns_objective": None,
-            "final_objective": None,
-            "final_seed": None,
-            "cp_status": "UNKNOWN",
-            "stopped": True,
-            "result_ready": False,
-            "files_exported": False,
-            "stop_stage": "initial",
-        }
 
     print(f"2. 构造ALNS初解池，preset={speed_preset}, scale={scale}, mode={initial_solution_mode}...")
     initial_obj, initial_mode, initial_snapshot = _build_initial_pool(
@@ -173,26 +194,35 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
     best_obj = initial_obj
     best_seed = initial_mode
     stopped = False
+    timed_out = False
     stop_stage = "none"
 
+    def aborted():
+        return stopped or timed_out
+
     def should_stop(stage):
-        nonlocal stopped, stop_stage
-        if stop_checker is not None and stop_checker():
+        nonlocal stopped, timed_out, stop_stage
+        if stop_checker is None or not stop_checker():
+            return False
+        is_user_stop = user_stop_checker is None or user_stop_checker()
+        if is_user_stop:
             if not stopped:
                 progress_logger.on_stop_requested()
-                stop_stage = stage
             stopped = True
-            return True
-        return False
+        else:
+            timed_out = True
+        stop_stage = stage
+        return True
 
     should_stop("initial")
 
-    if stage1_sec > 0 and not stopped:
-        print(f"3. Stage-1 ALNS预热 ({stage1_sec}s)...")
+    stage1_budget = _stage_budget(stage1_sec, deadline_monotonic)
+    if stage1_budget > 0 and not aborted():
+        print(f"3. Stage-1 ALNS预热 ({stage1_budget}s)...")
         stage1_snapshot, _, _, stage1_obj = core._run_alns(
             I, J1, J2, J3, J4, B, p1, p2, p3, p4, d, T, w, scale,
             stage_staff_limits, clear_time_matrices, machine_available_time, release_time,
-            max_continuous_run, best_snapshot, best_obj, stage1_sec, num_workers,
+            max_continuous_run, best_snapshot, best_obj, stage1_budget, num_workers,
             rng_seed=seed_list[0],
             progress_logger=progress_logger,
             periodic_cleaning_time=periodic_cleaning_time,
@@ -206,11 +236,17 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
             best_seed = f"warmup-{seed_list[0]}"
         should_stop("stage1")
 
-    if stage2_sec > 0 and not stopped:
-        print(f"4. Stage-2 ALNS优化 ({stage2_sec}s)...")
-        remaining_budget = int(stage2_sec)
+    stage2_budget = _stage_budget(stage2_sec, deadline_monotonic)
+    if stage2_budget > 0 and not aborted():
+        print(f"4. Stage-2 ALNS优化 ({stage2_budget}s)...")
+        remaining_budget = int(stage2_budget)
         for idx, seed in enumerate(seed_list):
             if should_stop("stage2"):
+                break
+            remaining_budget = int(_stage_budget(remaining_budget, deadline_monotonic))
+            if remaining_budget <= 0:
+                timed_out = True
+                stop_stage = "stage2"
                 break
             seeds_left = len(seed_list) - idx
             run_budget = max(1, remaining_budget // max(1, seeds_left))
@@ -237,7 +273,7 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
             if should_stop("stage2") or remaining_budget <= 0:
                 break
 
-    if not stopped:
+    if not aborted():
         refined_snapshot, refined_obj, moved_specs = core._left_shift_pack_snapshot(
             best_snapshot, I, J4, B, p4, d, T, w, scale,
             clear_time_matrices, machine_available_time, stage_staff_limits,
@@ -274,8 +310,9 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
     cp_status = cp_model.UNKNOWN
     cp_snapshot = None
     cp_obj = None
-    if cp_sec > 0 and not should_stop("cp"):
-        cp_solver = core._make_solver(cp_sec, num_workers, seed=seed_list[0], log=True)
+    cp_budget = _stage_budget(cp_sec, deadline_monotonic)
+    if cp_budget > 0 and not should_stop("cp"):
+        cp_solver = core._make_solver(cp_budget, num_workers, seed=seed_list[0], log=True)
         def _cp_log_callback(_message):
             progress_logger.maybe_emit_periodic()
             if stop_checker is not None and stop_checker():
@@ -327,12 +364,13 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
 
     if stopped:
         progress_logger.on_stopped_with_result()
-    elif cp_status == cp_model.OPTIMAL:
-        progress_logger.on_optimal_found()
-    elif cp_status == cp_model.INFEASIBLE and final_snapshot is None:
-        progress_logger.on_infeasible()
+    elif timed_out or cp_status != cp_model.OPTIMAL:
+        if cp_status == cp_model.INFEASIBLE and final_snapshot is None:
+            progress_logger.on_infeasible()
+        else:
+            progress_logger.on_time_limit()
     else:
-        progress_logger.on_time_limit()
+        progress_logger.on_optimal_found()
 
     return {
         "alns_objective": best_obj,
@@ -340,6 +378,7 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
         "final_seed": final_seed,
         "cp_status": status_map.get(cp_status, cp_status),
         "stopped": stopped,
+        "timed_out": timed_out,
         "result_ready": True,
         "files_exported": bool(files_exported),
         "stop_stage": stop_stage,
@@ -368,6 +407,8 @@ def solve_pharmaceutical_schedule_cp_hybrid(
     minor_cleaning_time_override=None,
     periodic_cleaning_time=1.0,
     stop_checker=None,
+    user_stop_checker=None,
+    deadline_monotonic=None,
     department="210车间",
     result_exporter=None,
 ):
@@ -399,6 +440,8 @@ def solve_pharmaceutical_schedule_cp_hybrid(
             minor_cleaning_time_override=minor_cleaning_time_override,
             periodic_cleaning_time=periodic_cleaning_time,
             stop_checker=stop_checker,
+            user_stop_checker=user_stop_checker,
+            deadline_monotonic=deadline_monotonic,
             department=department,
             result_exporter=result_exporter,
         )
@@ -511,6 +554,8 @@ def run_full_schedule_pipeline(
     minor_cleaning_time_override=None,
     periodic_cleaning_time=1.0,
     stop_checker=None,
+    user_stop_checker=None,
+    deadline_monotonic=None,
     department="210车间",
     on_result_exported=None,
 ):
@@ -556,6 +601,8 @@ def run_full_schedule_pipeline(
         minor_cleaning_time_override=minor_cleaning_time_override,
         periodic_cleaning_time=periodic_cleaning_time,
         stop_checker=stop_checker,
+        user_stop_checker=user_stop_checker,
+        deadline_monotonic=deadline_monotonic,
         department=department,
         result_exporter=result_exporter,
     )

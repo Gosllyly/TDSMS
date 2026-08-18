@@ -16,7 +16,7 @@ from api.serializers import SolveMatchCheckSerializer, SolveStartSerializer
 from api.utils import ApiResponse, attachment_file_response, get_request_params
 from api.views.common import format_datetime
 from core.models import SolveTask, TaskImportRecord
-from services.solve_match_service import compare_task_plan_with_aps
+from services.solve_match_service import compare_task_plan_with_aps, match_check_data
 
 
 def get_owned_solve(user, solve_id):
@@ -73,19 +73,6 @@ class SolveStartView(APIView):
         with transaction.atomic():
             # 在支持行锁的数据库中串行化同一用户的并发提交请求。
             request.user.__class__.objects.select_for_update().get(pk=request.user.pk)
-            active_solve = active_queryset.order_by("createTime").first()
-            if active_solve:
-                return ApiResponse(
-                    {
-                        "solveTaskId": active_solve.solveTaskId,
-                        "taskId": active_solve.task_id,
-                        "importId": active_solve.task_id,
-                        "solveStatus": active_solve.solveStatus,
-                        "createTime": format_datetime(active_solve.createTime),
-                    },
-                    status.HTTP_409_CONFLICT,
-                    "您还有模型计算正在运行，无法提交新的求解任务",
-                )
             match_error_data = {
                 "department": data["department"],
                 "matchedCount": match_result["matchedCount"],
@@ -110,6 +97,15 @@ class SolveStartView(APIView):
                     status.HTTP_409_CONFLICT,
                     "当前求解部门存在未匹配的计划数据，请先维护APS档案或确认跳过缺失项",
                 )
+            for active_solve in SolveTask.objects.filter(
+                createdUser=request.user,
+                isDeleted=0,
+                solveStatus__in=[0, 1],
+            ).order_by("createTime"):
+                try:
+                    stop_solver(active_solve.solveTaskId)
+                except FileNotFoundError:
+                    continue
             data["matchedCount"] = match_result["matchedCount"]
             data["skippedCount"] = (
                 match_result["unmatchedCount"]
@@ -150,13 +146,12 @@ class SolveMatchCheckView(APIView):
         ).select_related("file", "apsArchive").first()
         if not task:
             raise NotFound("任务记录不存在或尚未导入成功")
-        result = compare_task_plan_with_aps(task)
-        if not result["totalCount"]:
-            message = "当前计划没有月份生产计划大于0的数据"
-        elif result["canStartSolve"]:
-            message = "计划数据与APS档案匹配通过"
-        else:
-            message = "存在未匹配的品种或规格，请先维护APS档案"
+        result = match_check_data(task, data["page"], data["pageSize"])
+        message = (
+            "计划数据与APS档案匹配通过"
+            if result["status"]
+            else "存在未匹配的品种或规格，请先维护APS档案"
+        )
         return ApiResponse(result, message=message)
 
 

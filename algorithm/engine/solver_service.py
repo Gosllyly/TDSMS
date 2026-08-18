@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -175,6 +176,9 @@ def stop_solver(taskId, task_root=None):
     task_dir = _task_dir(taskId, task_root)
     (task_dir / STOP_REQUEST_FILE).write_text(_now(), encoding="utf-8")
     _append_log(task_dir, "任务已请求停止")
+    visual_file = Path(_result_files(task_dir)["visualBoard"])
+    if not visual_file.is_file():
+        return _force_stop_solver(taskId, task_root=task_root)
     _update_status(
         task_dir,
         status=STATUS_STOPPING,
@@ -201,7 +205,14 @@ def _solver_worker(task_id, task_dir_text, params):
     task_dir = Path(task_dir_text)
     log_path = task_dir / "solver.log"
     _update_status(task_dir, status=STATUS_RUNNING, pid=os.getpid(), startedAt=_now())
-    stop_checker = lambda: _stop_requested(task_dir)
+    deadline = time.monotonic() + float(params["solverTimeLimitMinutes"]) * 60
+
+    def user_stop_checker():
+        return _stop_requested(task_dir)
+
+    def stop_checker():
+        return user_stop_checker() or time.monotonic() >= deadline
+
     try:
         with log_path.open("a", encoding="utf-8") as log_file:
             with redirect_stdout(log_file), redirect_stderr(log_file):
@@ -225,10 +236,12 @@ def _solver_worker(task_id, task_dir_text, params):
                 result = _run_pipeline_for_task(
                     task_dir, params, emit,
                     stop_checker=stop_checker,
+                    user_stop_checker=user_stop_checker,
+                    deadline_monotonic=deadline,
                     on_result_exported=on_result_exported,
                 )
                 status = _read_json(task_dir / "status.json")
-                if stop_checker():
+                if user_stop_checker():
                     visual_file = Path(_result_files(task_dir)["visualBoard"])
                     result_ready = visual_file.exists()
                     _update_status(
@@ -274,7 +287,10 @@ def _solver_worker(task_id, task_dir_text, params):
         raise
 
 
-def _run_pipeline_for_task(task_dir, params, emit, stop_checker=None, on_result_exported=None):
+def _run_pipeline_for_task(
+    task_dir, params, emit, stop_checker=None, user_stop_checker=None,
+    deadline_monotonic=None, on_result_exported=None,
+):
     options = params["options"]
     stage_seconds = options["stage_seconds"]
     raw_file = task_dir / "排产结果明细.xlsx"
@@ -299,6 +315,8 @@ def _run_pipeline_for_task(task_dir, params, emit, stop_checker=None, on_result_
         minor_cleaning_time_override=options["minor_cleaning_shifts"],
         periodic_cleaning_time=options["periodic_cleaning_shifts"],
         stop_checker=stop_checker,
+        user_stop_checker=user_stop_checker,
+        deadline_monotonic=deadline_monotonic,
         department=options.get("department", "210车间"),
         on_result_exported=on_result_exported,
     )

@@ -21,7 +21,12 @@ from core.models import (
     ApsArchive, ApsArchiveItem, SolveTask, SysUser, TaskImportRecord, UploadFile, UploadFileItem,
 )
 from services.excel_service import parse_aps_file
-from services.solve_match_service import compare_task_plan_with_aps
+from services.solve_match_service import (
+    REASON_MISSING_BOTH,
+    REASON_MISSING_PRODUCT,
+    REASON_MISSING_SPEC,
+    compare_task_plan_with_aps,
+)
 
 
 class ApiIntegrationTests(APITestCase):
@@ -229,8 +234,7 @@ class ApiIntegrationTests(APITestCase):
         self.assertEqual(hidden.status_code, 404)
 
     def test_plan_detail_json_filters_and_single_filter_option_query(self):
-        task = self.create_task()
-        task.file.items.update(isDeleted=1)
+        task = self.create_solve_record().task
         first = UploadFileItem.objects.create(
             file=task.file,
             departmentName="302车间",
@@ -267,16 +271,58 @@ class ApiIntegrationTests(APITestCase):
         self.assertEqual(response.data["data"]["total"], 1)
         self.assertEqual(response.data["data"]["records"][0]["itemId"], first.itemId)
 
-        options = self.client.get(
+        options = self.client.post(
             "/tdsms/task/detailFilterOptions",
-            {"taskId": task.taskId, "option": "departmentNames"},
+            {
+                "taskId": task.taskId,
+                "option": "departmentNames",
+                "departmentNames": [],
+                "monthlyProductionPlans": [],
+                "inventoryNames": [],
+            },
+            format="json",
         )
         self.assertEqual(options.status_code, 200, options.data)
         self.assertEqual(options.data["data"], ["302车间", "303车间"])
 
-        invalid = self.client.get(
+        linked = self.client.post(
             "/tdsms/task/detailFilterOptions",
-            {"taskId": task.taskId, "option": "unknown"},
+            {
+                "taskId": task.taskId,
+                "option": "departmentNames",
+                "departmentNames": [],
+                "monthlyProductionPlans": [100],
+                "inventoryNames": ["阿司匹林片"],
+            },
+            format="json",
+        )
+        self.assertEqual(linked.status_code, 200, linked.data)
+        self.assertEqual(linked.data["data"], ["302车间"])
+
+        plans = self.client.post(
+            "/tdsms/task/detailFilterOptions",
+            {
+                "taskId": task.taskId,
+                "option": "monthlyProductionPlans",
+                "departmentNames": ["303车间"],
+                "monthlyProductionPlans": [],
+                "inventoryNames": [],
+            },
+            format="json",
+        )
+        self.assertEqual(plans.status_code, 200, plans.data)
+        self.assertEqual(plans.data["data"], [200.0])
+
+        invalid = self.client.post(
+            "/tdsms/task/detailFilterOptions",
+            {
+                "taskId": task.taskId,
+                "option": "unknown",
+                "departmentNames": [],
+                "monthlyProductionPlans": [],
+                "inventoryNames": [],
+            },
+            format="json",
         )
         self.assertEqual(invalid.status_code, 400)
 
@@ -510,14 +556,17 @@ class ApiIntegrationTests(APITestCase):
 
         solve.refresh_from_db()
         self.assertEqual(solve.solveStatus, 2)
-        self.assertEqual(solve.finishReason, 1)
+        self.assertEqual(solve.finishReason, 2)
         self.assertEqual(solve.resultFilePath, str(visual))
         self.assertTrue(visual.is_file())
         self.assertFalse(intermediate.exists())
         self.assertFalse(Path(arguments["apsFile"]).exists())
 
     def test_solve_match_check_applies_mappings_and_reports_unmatched_items(self):
-        task = self.create_task()
+        solve = self.create_solve_record()
+        task = solve.task
+        solve.solveStatus = 2
+        solve.save(update_fields=["solveStatus"])
         task.file.items.update(isDeleted=1)
         task.apsArchive.items.update(isDeleted=1)
         plan_rows = [
@@ -544,6 +593,13 @@ class ApiIntegrationTests(APITestCase):
             },
             {
                 "departmentName": "210车间",
+                "materialCode": "M-003B",
+                "inventoryName": "未维护药品",
+                "specification": "20mg×10片",
+                "monthlyProductionPlan": 10,
+            },
+            {
+                "departmentName": "210车间",
                 "materialCode": "M-004",
                 "inventoryName": "零计划药品",
                 "specification": "1mg×10片",
@@ -557,11 +613,39 @@ class ApiIntegrationTests(APITestCase):
                 "monthlyProductionPlan": 50,
             },
             {
+                "departmentName": "302车间",
+                "materialCode": "M-007",
+                "inventoryName": "阿德福韦酯片",
+                "specification": "20mg×10片",
+                "monthlyProductionPlan": 80,
+            },
+            {
+                "departmentName": "302车间",
+                "materialCode": "M-008",
+                "inventoryName": "不存在品种",
+                "specification": "10mg×28片×100瓶",
+                "monthlyProductionPlan": 90,
+            },
+            {
+                "departmentName": "302车间",
+                "materialCode": "M-009",
+                "inventoryName": "阿司匹林肠溶片100mg",
+                "specification": "10mg×28片×100瓶",
+                "monthlyProductionPlan": 40,
+            },
+            {
                 "departmentName": "303车间",
                 "materialCode": "M-006",
                 "inventoryName": "完全未匹配药品",
                 "specification": "30mg×10片",
                 "monthlyProductionPlan": 60,
+            },
+            {
+                "departmentName": "303车间",
+                "materialCode": "M-006B",
+                "inventoryName": "完全未匹配药品",
+                "specification": "30mg×10片",
+                "monthlyProductionPlan": 70,
             },
         ]
         UploadFileItem.objects.bulk_create([
@@ -587,27 +671,53 @@ class ApiIntegrationTests(APITestCase):
         )
         self.assertEqual(response.status_code, 200, response.data)
         result = response.data["data"]
-        self.assertFalse(result["canStartSolve"])
-        self.assertEqual(result["totalCount"], 5)
-        self.assertEqual(result["matchedCount"], 3)
-        self.assertEqual(result["unmatchedCount"], 2)
-        self.assertEqual(result["departmentCount"], 3)
-        statistics = {
-            record["departmentName"]: record
-            for record in result["departmentStatistics"]
+        self.assertFalse(result["status"])
+        self.assertEqual(result["page"], 1)
+        self.assertEqual(result["pageSize"], 10)
+        missing = {
+            (record["inventoryName"], record["specification"]): record["reason"]
+            for record in result["missingData"]
         }
-        self.assertEqual(statistics["210车间"]["totalCount"], 3)
-        self.assertEqual(statistics["302车间"]["matchedCount"], 1)
-        self.assertEqual(statistics["303车间"]["unmatchedCount"], 1)
-        mapped = next(
-            record for record in result["matchedRecords"]
-            if record["inventoryName"] == "阿司匹林肠溶片（过评）"
+        self.assertEqual(result["total"], 6)
+        self.assertEqual(len(result["missingData"]), 6)
+        self.assertEqual(
+            set(missing),
+            {
+                ("未维护药品", "20mg×10片"),
+                ("零计划药品", "1mg×10片"),
+                ("阿德福韦酯片", "20mg×10片"),
+                ("不存在品种", "10mg×28片×100瓶"),
+                ("阿司匹林肠溶片100mg", "10mg×28片×100瓶"),
+                ("完全未匹配药品", "30mg×10片"),
+            },
         )
-        self.assertEqual(mapped["apsProductName"], "阿司匹林肠溶片100mg")
-        self.assertEqual(mapped["apsPackageSpecification"], "47.5mg×14片×2板×400盒")
-        self.assertTrue(mapped["nameMapped"])
-        self.assertTrue(mapped["specificationMapped"])
-        self.assertEqual(result["unmatchedRecords"][0]["inventoryName"], "未维护药品")
+        self.assertEqual(missing[("阿德福韦酯片", "20mg×10片")], REASON_MISSING_SPEC)
+        self.assertEqual(missing[("不存在品种", "10mg×28片×100瓶")], REASON_MISSING_PRODUCT)
+        self.assertEqual(missing[("未维护药品", "20mg×10片")], REASON_MISSING_BOTH)
+        self.assertEqual(missing[("阿司匹林肠溶片100mg", "10mg×28片×100瓶")], REASON_MISSING_BOTH)
+        self.assertEqual(missing[("零计划药品", "1mg×10片")], REASON_MISSING_BOTH)
+        self.assertEqual(missing[("完全未匹配药品", "30mg×10片")], REASON_MISSING_BOTH)
+        self.assertNotIn(("阿司匹林肠溶片（过评）", "47.5mg×14粒×2板×400盒"), missing)
+        self.assertNotIn(("阿德福韦酯片", "10mg×28片×100瓶"), missing)
+        for record in result["missingData"]:
+            self.assertEqual(set(record), {"inventoryName", "specification", "reason"})
+
+        paged = self.client.post(
+            "/tdsms/solve/matchCheck",
+            {"taskId": task.taskId, "page": 2, "pageSize": 2},
+            format="json",
+        )
+        self.assertEqual(paged.status_code, 200, paged.data)
+        paged_data = paged.data["data"]
+        self.assertFalse(paged_data["status"])
+        self.assertEqual(paged_data["total"], 6)
+        self.assertEqual(paged_data["page"], 2)
+        self.assertEqual(paged_data["pageSize"], 2)
+        self.assertEqual(len(paged_data["missingData"]), 2)
+        self.assertEqual(
+            paged_data["missingData"],
+            result["missingData"][2:4],
+        )
 
         start_payload = {
             "taskId": task.taskId,
@@ -690,16 +800,10 @@ class ApiIntegrationTests(APITestCase):
         self.assertEqual(solve.finishReason, 3)
         self.assertIsNotNone(solve.finishTime)
 
-    def test_stopping_task_is_not_marked_stopped_until_result_postprocessing_finishes(self):
+    def test_stopping_task_marks_stopped_immediately_and_keeps_partial_result(self):
         from algorithm.adapter import sync_solve_task
 
-        task = self.create_task()
-        solve = SolveTask.objects.create(
-            task=task,
-            createdUser=self.user,
-            inputParams={},
-            solveStatus=1,
-        )
+        solve = self.create_solve_record()
         run_dir = Path(settings.ALGORITHM_RUN_ROOT) / str(solve.solveTaskId)
         run_dir.mkdir(parents=True, exist_ok=True)
         visual = run_dir / "可排产结果可视化.xlsx"
@@ -720,8 +824,9 @@ class ApiIntegrationTests(APITestCase):
             sync_solve_task(solve, cleanup=False)
 
         solve.refresh_from_db()
-        self.assertEqual(solve.solveStatus, 1)
-        self.assertIsNone(solve.finishReason)
+        self.assertEqual(solve.solveStatus, 4)
+        self.assertEqual(solve.finishReason, 3)
+        self.assertIsNotNone(solve.finishTime)
         self.assertFalse(solve.partialResultFilePath)
 
         visual.write_bytes(b"result")
@@ -868,17 +973,43 @@ class ApiIntegrationTests(APITestCase):
         self.assertIn("结果文件尚未生成", response.data["message"])
 
     @patch("api.views.solve_views.submit_solver")
-    def test_each_user_can_only_run_one_solve_while_different_users_can_run_concurrently(
+    def test_start_stops_current_user_running_solve_then_starts_new(
         self,
         submit_solver_mock,
     ):
-        task = self.create_task()
-        department = self.solvable_department(task)
+        self.login()
+        archive = ApsArchive.objects.create(archiveName="测试档案", createdBy=self.user)
+        ApsArchiveItem.objects.create(
+            archive=archive,
+            productName="阿德福韦酯片",
+            packageSpecification="10mg×28片×100瓶",
+        )
+        upload = UploadFile.objects.create(
+            originalName="plan.xlsx",
+            fileName="plan.xlsx",
+            filePath="plan.xlsx",
+            uploadUser=self.user,
+            parseStatus=1,
+        )
+        UploadFileItem.objects.create(
+            file=upload,
+            departmentName="210车间",
+            materialCode="M-001",
+            inventoryName="阿德福韦酯片",
+            specification="10mg×28片×100瓶",
+            monthlyProductionPlan=100,
+        )
+        task = TaskImportRecord.objects.create(
+            apsArchive=archive,
+            file=upload,
+            importStatus=1,
+            createdBy=self.user,
+        )
 
         def payload(task_id):
             return {
                 "taskId": task_id,
-                "department": department,
+                "department": "210车间",
                 "scheduleMonth": "2025-06",
                 "unmatchedItemPolicy": "SKIP",
                 "productionRules": {
@@ -911,31 +1042,41 @@ class ApiIntegrationTests(APITestCase):
             importStatus=1,
             createdBy=self.user,
         )
-        blocked = self.client.post(
+        replaced = self.client.post(
             "/tdsms/solve/start",
             payload(another_task.taskId),
             format="json",
         )
-        self.assertEqual(blocked.status_code, 409, blocked.data)
-        self.assertEqual(blocked.data["data"]["solveTaskId"], first_solve_id)
-        self.assertEqual(
-            blocked.data["message"],
-            "您还有模型计算正在运行，无法提交新的求解任务",
-        )
+        self.assertEqual(replaced.status_code, 202, replaced.data)
+        second_solve_id = replaced.data["data"]["solveTaskId"]
+        self.assertNotEqual(second_solve_id, first_solve_id)
+        self.assertEqual(SolveTask.objects.get(solveTaskId=first_solve_id).solveStatus, 4)
+        self.assertEqual(SolveTask.objects.get(solveTaskId=second_solve_id).solveStatus, 0)
 
-        SolveTask.objects.filter(solveTaskId=first_solve_id).update(solveStatus=2)
-        resumed = self.client.post(
-            "/tdsms/solve/start",
-            payload(another_task.taskId),
-            format="json",
+        other_archive = ApsArchive.objects.create(archiveName="对方档案", createdBy=self.other)
+        ApsArchiveItem.objects.create(
+            archive=other_archive,
+            productName="阿德福韦酯片",
+            packageSpecification="10mg×28片×100瓶",
         )
-        self.assertEqual(resumed.status_code, 202, resumed.data)
-
+        other_upload = UploadFile.objects.create(
+            originalName="plan.xlsx",
+            fileName="plan2.xlsx",
+            filePath="plan2.xlsx",
+            uploadUser=self.other,
+            parseStatus=1,
+        )
+        UploadFileItem.objects.create(
+            file=other_upload,
+            departmentName="210车间",
+            materialCode="M-001",
+            inventoryName="阿德福韦酯片",
+            specification="10mg×28片×100瓶",
+            monthlyProductionPlan=100,
+        )
         other_task = TaskImportRecord.objects.create(
-            sourceType=2,
-            sourceTask=task,
-            apsArchive=task.apsArchive,
-            file=task.file,
+            apsArchive=other_archive,
+            file=other_upload,
             importStatus=1,
             createdBy=self.other,
         )
@@ -947,4 +1088,5 @@ class ApiIntegrationTests(APITestCase):
             format="json",
         )
         self.assertEqual(other_started.status_code, 202, other_started.data)
+        self.assertEqual(SolveTask.objects.get(solveTaskId=second_solve_id).solveStatus, 0)
         self.assertEqual(submit_solver_mock.call_count, 3)

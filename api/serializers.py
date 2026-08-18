@@ -129,6 +129,8 @@ class SolveStartSerializer(serializers.Serializer):
 class SolveMatchCheckSerializer(serializers.Serializer):
     taskId = serializers.IntegerField(min_value=1, required=False)
     importId = serializers.IntegerField(min_value=1, required=False)
+    page = serializers.IntegerField(min_value=1, required=False, default=1)
+    pageSize = serializers.IntegerField(min_value=1, max_value=200, required=False, default=10)
 
     def validate(self, attrs):
         if not (attrs.get("taskId") or attrs.get("importId")):

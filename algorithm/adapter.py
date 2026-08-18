@@ -26,7 +26,7 @@ from services.aps_export_service import export_aps_archive
 ENGINE_STATUS_TO_DB = {
     "PENDING": 0,
     "RUNNING": 1,
-    "STOPPING": 1,
+    "STOPPING": 4,
     "SUCCESS": 2,
     "FAILED": 3,
     "STOPPED": 4,
@@ -162,7 +162,7 @@ def _finish_reason(state):
         return 4
     if status == "SUCCESS":
         result = state.get("result") or {}
-        return 1 if result.get("cp_status") == "OPTIMAL" else 2
+        return 2 if result.get("cp_status") == "OPTIMAL" else 1
     return None
 
 
@@ -186,15 +186,16 @@ def sync_solve_task(solve_or_id, cleanup=True):
         return solve, None
 
     engine_status = state.get("status")
-    # STOPPED without finishedAt is compatible with an older engine state file:
-    # the stop signal was accepted, but result post-processing is not finished yet.
-    if engine_status == "STOPPED" and not state.get("finishedAt"):
-        solve.solveStatus = 1
-    else:
-        solve.solveStatus = ENGINE_STATUS_TO_DB.get(engine_status, solve.solveStatus)
+    solve.solveStatus = ENGINE_STATUS_TO_DB.get(engine_status, solve.solveStatus)
     solve.startTime = _parse_engine_time(state.get("startedAt")) or solve.startTime
     solve.finishTime = _parse_engine_time(state.get("finishedAt")) or solve.finishTime
-    solve.finishReason = _finish_reason(state) if _is_finished_state(state) else None
+    if engine_status in {"STOPPING", "STOPPED"}:
+        solve.finishReason = 3
+        solve.finishTime = solve.finishTime or timezone.now()
+    elif _is_finished_state(state):
+        solve.finishReason = _finish_reason(state)
+    else:
+        solve.finishReason = None
 
     visual_path = (state.get("resultFiles") or {}).get("visualBoard")
     visual = Path(visual_path) if visual_path else None

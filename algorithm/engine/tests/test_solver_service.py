@@ -76,6 +76,13 @@ class SolverServiceConversionTests(unittest.TestCase):
         self.assertEqual(allocate_solver_seconds(20), (750, 225, 225))
         self.assertEqual(sum(allocate_solver_seconds(1)), 60)
 
+    def test_stage_budget_caps_to_remaining_deadline(self):
+        from run_schedule_hybrid import _stage_budget
+        import time
+
+        self.assertEqual(_stage_budget(100, None), 100.0)
+        self.assertEqual(_stage_budget(100, time.monotonic() - 1), 0.0)
+
 
 class SolverServiceTaskTests(unittest.TestCase):
     def test_run_solver_creates_task_files_and_finishes_success_with_inline_worker(self):
@@ -120,6 +127,44 @@ class SolverServiceTaskTests(unittest.TestCase):
             self.assertTrue(status["resultFiles"]["visualBoard"].endswith("可排产结果可视化.xlsx"))
             self.assertFalse(status["stopRequested"])
             self.assertTrue(status["resultReady"])
+
+    def test_time_limit_finishes_success_instead_of_stopped(self):
+        from solver_service import query_solver_status, run_solver
+
+        clock = {"now": 0.0}
+
+        def monotonic():
+            return clock["now"]
+
+        def fake_pipeline(**kwargs):
+            clock["now"] = 10 ** 9
+            self.assertTrue(kwargs["stop_checker"]())
+            self.assertFalse(kwargs["user_stop_checker"]())
+            Path(kwargs["visual_output_file"]).write_text("visual", encoding="utf-8")
+            kwargs["on_result_exported"]("final")
+            return {"cp_status": "FEASIBLE", "stopped": False, "timed_out": True, "files_exported": True}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_root = Path(tmp)
+            with mock.patch("solver_service.time.monotonic", side_effect=monotonic), mock.patch(
+                "solver_service.run_full_schedule_pipeline", side_effect=fake_pipeline
+            ):
+                result = run_solver(
+                    1002,
+                    "plan.xlsx",
+                    "aps.xlsx",
+                    "2026年08月",
+                    2, 0.5, 0.25, 0.5, 31, 2, 4, 3, 2, 5, 20,
+                    department="Workshop-A",
+                    task_root=task_root,
+                    run_inline=True,
+                )
+
+            status = query_solver_status(result["taskId"], task_root=task_root)
+            self.assertEqual(status["status"], "SUCCESS")
+            self.assertFalse(status["stopRequested"])
+            self.assertTrue(status["resultReady"])
+            self.assertIsNone(status.get("stopMode"))
 
     def test_export_solver_result_returns_only_visual_board(self):
         from solver_service import export_solver_result
@@ -195,7 +240,7 @@ class SolverServiceTaskTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 export_solver_result("task-1", task_root=task_root)
 
-    def test_stop_solver_requests_graceful_stop_without_terminating_process(self):
+    def test_stop_solver_force_stops_when_no_visual_result_exists(self):
         from solver_service import query_solver_status, stop_solver
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -210,6 +255,41 @@ class SolverServiceTaskTests(unittest.TestCase):
                         "pid": 12345,
                         "stopRequested": False,
                         "resultReady": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            fake_process = mock.Mock()
+            with mock.patch.dict("solver_service.RUNNING_PROCESSES", {"task-1": fake_process}):
+                result = stop_solver("task-1", task_root=task_root)
+
+            self.assertEqual(result["status"], "STOPPED")
+            self.assertTrue((task_dir / "stop.requested").exists())
+            status = query_solver_status("task-1", task_root=task_root)
+            self.assertEqual(status["status"], "STOPPED")
+            self.assertTrue(status["stopRequested"])
+            self.assertEqual(status["stopMode"], "force")
+            fake_process.terminate.assert_called_once()
+            fake_process.join.assert_called_once()
+
+    def test_stop_solver_requests_graceful_stop_without_terminating_process(self):
+        from solver_service import query_solver_status, stop_solver
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_root = Path(tmp)
+            task_dir = task_root / "task-1"
+            task_dir.mkdir()
+            (task_dir / "可排产结果可视化.xlsx").write_text("visual", encoding="utf-8")
+            (task_dir / "status.json").write_text(
+                json.dumps(
+                    {
+                        "taskId": "task-1",
+                        "status": "RUNNING",
+                        "pid": 12345,
+                        "stopRequested": False,
+                        "resultReady": True,
                     },
                     ensure_ascii=False,
                 ),
@@ -442,6 +522,40 @@ class RunSchedulePipelineStopTests(unittest.TestCase):
         self.assertTrue(result["files_exported"])
         logger.on_first_solution_found.assert_called_once()
         logger.on_time_limit.assert_called_once()
+
+    def test_wall_clock_timeout_stops_search_without_user_stop(self):
+        from run_schedule_hybrid import _solve_pharmaceutical_schedule_cp_hybrid_impl
+
+        logger = mock.Mock()
+
+        def fake_inputs(*args, **kwargs):
+            return (
+                ["item-1"], ["mix-1"], ["tab-1"], ["coat-1"], ["pack-1"],
+                {"item-1": [1]}, {}, {}, {}, {}, {}, {}, {}, {},
+                {}, {}, {}, {}, 11,
+            )
+
+        with mock.patch("run_schedule_hybrid.core.build_schedule_inputs", side_effect=fake_inputs), mock.patch(
+            "run_schedule_hybrid._build_initial_pool"
+        ) as build_pool, mock.patch("run_schedule_hybrid.core._run_alns") as run_alns:
+            result = _solve_pharmaceutical_schedule_cp_hybrid_impl(
+                "plan.xlsx",
+                "aps.xlsx",
+                stage1_sec=30,
+                stage2_sec=30,
+                cp_sec=30,
+                progress_logger=logger,
+                stop_checker=lambda: True,
+                user_stop_checker=lambda: False,
+                deadline_monotonic=0,
+            )
+
+        self.assertTrue(result["timed_out"])
+        self.assertFalse(result["stopped"])
+        build_pool.assert_not_called()
+        run_alns.assert_not_called()
+        logger.on_time_limit.assert_called_once()
+        logger.on_stop_requested.assert_not_called()
 
     def test_pipeline_skips_fallback_postprocess_when_solver_already_exported(self):
         from run_schedule_hybrid import run_full_schedule_pipeline
