@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
@@ -18,6 +19,19 @@ APS_HEADERS = [
     "用人", "生产周期/天", "是否集采品种", "年销量/万",
 ]
 PLAN_HEADERS = ["部门", "物料编码", "存货名称", "规格", "U8现存量", "月份生产计划", "提报合计"]
+# 允许「月份生产计划」「7月份生产计划」「07月份生产计划」
+MONTHLY_PLAN_HEADER_RE = re.compile(r"^(?:0?[1-9]|1[0-2])?月份生产计划$")
+
+
+def _is_plan_header_row(headers):
+    if len(headers) < 7:
+        return False
+    expected = PLAN_HEADERS[:]
+    actual = headers[:7]
+    if actual[5] and MONTHLY_PLAN_HEADER_RE.match(actual[5]):
+        actual = actual[:]
+        actual[5] = expected[5]
+    return actual == expected
 
 
 def _load_rows(uploaded_file):
@@ -114,7 +128,7 @@ def parse_aps_file(uploaded_file):
 
 def parse_plan_file(uploaded_file):
     rows = _load_rows(uploaded_file)
-    if not rows or [_text(v) for v in rows[0][:7]] != PLAN_HEADERS:
+    if not rows or not _is_plan_header_row([_text(v) for v in rows[0][:7]]):
         raise ExcelValidationError("计划文件表头与系统模板不一致")
     result = []
     for row_no, row in enumerate(rows[1:], start=2):

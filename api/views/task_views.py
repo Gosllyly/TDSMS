@@ -18,10 +18,11 @@ def task_data(task):
     return {
         "taskId": task.taskId, "importId": task.taskId, "sourceType": task.sourceType,
         "sourceTaskId": task.sourceTask_id, "originalFileName": task.file.originalName,
+        "taskName": task.file.originalName,
         "fileId": task.file_id,
         "apsArchive": {"archiveId": task.apsArchive_id, "archiveName": task.apsArchive.archiveName},
         "remark": task.remark, "dataCount": task.file.items.filter(isDeleted=0).count(),
-        "importStatus": task.importStatus, "createdBy": task.createdBy_id,
+        "importStatus": task.importStatus, "createdBy": task.createdBy.realName,
         "createTime": format_datetime(task.createTime), "updateTime": format_datetime(task.updateTime),
     }
 
@@ -45,7 +46,7 @@ class TaskTemplateView(APIView):
 class TaskHistoryView(APIView):
     def get(self, request):
         params = get_request_params(request)
-        queryset = TaskImportRecord.objects.filter(createdBy=request.user, isDeleted=0).select_related("file", "apsArchive").order_by("-createTime")
+        queryset = TaskImportRecord.objects.filter(createdBy=request.user, isDeleted=0).select_related("file", "apsArchive", "createdBy").order_by("-createTime")
         total, records, page, page_size = paginate(queryset, params.get("page"), params.get("pageSize"))
         return ApiResponse({"total": total, "page": page, "pageSize": page_size, "records": [task_data(x) for x in records]}, message="查询成功")
 
@@ -65,7 +66,7 @@ class TaskHistoryImportView(APIView):
     def post(self, request):
         serializer = HistoryImportSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        source = TaskImportRecord.objects.filter(taskId=serializer.validated_data["taskId"], createdBy=request.user, isDeleted=0, importStatus=1).select_related("file", "apsArchive").first()
+        source = TaskImportRecord.objects.filter(taskId=serializer.validated_data["taskId"], createdBy=request.user, isDeleted=0, importStatus=1).select_related("file", "apsArchive", "createdBy").first()
         if not source:
             raise NotFound("历史导入记录不存在")
         if source.apsArchive.isDeleted:
