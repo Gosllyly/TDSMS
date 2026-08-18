@@ -16,7 +16,7 @@ from api.serializers import SolveMatchCheckSerializer, SolveStartSerializer
 from api.utils import ApiResponse, attachment_file_response, get_request_params
 from api.views.common import format_datetime
 from core.models import SolveTask, TaskImportRecord
-from services.solve_match_service import compare_task_plan_with_aps, match_check_data
+from services.solve_match_service import match_check_data
 
 
 def get_owned_solve(user, solve_id):
@@ -60,7 +60,6 @@ class SolveStartView(APIView):
             isDeleted=0,
         ).exists():
             raise ValidationError("所选部门在当前任务计划中不存在")
-        match_result = compare_task_plan_with_aps(task, data["department"])
         active_queryset = SolveTask.objects.filter(
             createdUser=request.user,
             isDeleted=0,
@@ -73,30 +72,6 @@ class SolveStartView(APIView):
         with transaction.atomic():
             # 在支持行锁的数据库中串行化同一用户的并发提交请求。
             request.user.__class__.objects.select_for_update().get(pk=request.user.pk)
-            match_error_data = {
-                "department": data["department"],
-                "matchedCount": match_result["matchedCount"],
-                "unmatchedCount": match_result["unmatchedCount"],
-                "unmatchedRecords": match_result["unmatchedRecords"],
-            }
-            if not match_result["totalCount"]:
-                return ApiResponse(
-                    match_error_data,
-                    status.HTTP_409_CONFLICT,
-                    "所选部门没有月份生产计划大于0的数据，无法开始求解",
-                )
-            if not match_result["matchedCount"]:
-                return ApiResponse(
-                    match_error_data,
-                    status.HTTP_409_CONFLICT,
-                    "所选部门的计划数据均未在APS档案中匹配，无法开始求解",
-                )
-            if match_result["unmatchedCount"] and data["unmatchedItemPolicy"] == "BLOCK":
-                return ApiResponse(
-                    match_error_data,
-                    status.HTTP_409_CONFLICT,
-                    "当前求解部门存在未匹配的计划数据，请先维护APS档案或确认跳过缺失项",
-                )
             for active_solve in SolveTask.objects.filter(
                 createdUser=request.user,
                 isDeleted=0,
@@ -106,12 +81,6 @@ class SolveStartView(APIView):
                     stop_solver(active_solve.solveTaskId)
                 except FileNotFoundError:
                     continue
-            data["matchedCount"] = match_result["matchedCount"]
-            data["skippedCount"] = (
-                match_result["unmatchedCount"]
-                if data["unmatchedItemPolicy"] == "SKIP"
-                else 0
-            )
             solve = SolveTask.objects.create(task=task, inputParams=data, createdUser=request.user)
         submit_solver(solve.solveTaskId)
         response_data = {
@@ -120,16 +89,9 @@ class SolveStartView(APIView):
             "importId": task.taskId,
             "solveStatus": 0,
             "unmatchedItemPolicy": data["unmatchedItemPolicy"],
-            "matchedCount": data["matchedCount"],
-            "skippedCount": data["skippedCount"],
             "createTime": format_datetime(solve.createTime),
         }
-        message = (
-            f"已跳过{data['skippedCount']}项未匹配数据，求解任务已创建"
-            if data["skippedCount"]
-            else "求解任务已创建"
-        )
-        return ApiResponse(response_data, status.HTTP_202_ACCEPTED, message)
+        return ApiResponse(response_data, status.HTTP_200_OK, "求解任务已创建")
 
 
 class SolveMatchCheckView(APIView):
@@ -174,14 +136,17 @@ class SolveLogsView(APIView):
         path = log_path(solve.solveTaskId)
         logs = []
         if path.is_file():
-            for index, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 created, content = parse_log_line(line)
+                if not created:
+                    continue
                 logs.append({
-                    "logId": index,
                     "logContent": content,
-                    "createTime": created.replace("T", " ", 1) if created else created,
+                    "createTime": created.replace("T", " ", 1),
                 })
-            logs.sort(key=lambda item: item["createTime"] or "", reverse=True)
+            logs.reverse()
+            for index, record in enumerate(logs, start=1):
+                record["logId"] = index
         return ApiResponse(logs, message="查询成功")
 
 

@@ -20,12 +20,14 @@ from core.models import SysUser
 def user_data(user, include_profile=True):
     data = {
         "userId": user.userId, "username": user.username, "status": user.status,
-        "expireTime": format_datetime(user.expireTime), "createTime": format_datetime(user.createTime),
+        "realName": user.realName, "departmentName": user.departmentName,
+        "expireTime": format_datetime(user.expireTime),
+        "lastLoginTime": format_datetime(user.lastLoginTime),
+        "createTime": format_datetime(user.createTime),
     }
     if include_profile:
         data.update({
-            "role": user.role, "realName": user.realName, "departmentName": user.departmentName,
-            "lastLoginTime": format_datetime(user.lastLoginTime), "updateTime": format_datetime(user.updateTime),
+            "role": user.role, "updateTime": format_datetime(user.updateTime),
         })
     if user.expireTime:
         data["remainingDays"] = max(0, ceil((user.expireTime - timezone.now()).total_seconds() / 86400))

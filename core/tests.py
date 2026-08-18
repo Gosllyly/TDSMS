@@ -418,7 +418,7 @@ class ApiIntegrationTests(APITestCase):
         )
         self.assertEqual(invalid_department.status_code, 400, invalid_department.data)
         started = self.client.post("/tdsms/solve/start", payload, format="json")
-        self.assertEqual(started.status_code, 202, started.data)
+        self.assertEqual(started.status_code, 200, started.data)
         solve_id = started.data["data"]["solveTaskId"]
         submit_solver_mock.assert_called_once_with(solve_id)
         self.assertEqual(
@@ -451,9 +451,14 @@ class ApiIntegrationTests(APITestCase):
         run_dir = Path(settings.ALGORITHM_RUN_ROOT) / str(solve.solveTaskId)
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "solver.log").write_text(
-            "[2026-08-11T14:44:18] 第一条\n"
-            "[2026-08-11T14:45:00] 第二条\n"
-            "2026-08-11T14:46:00+08:00\t第三条\n",
+            "[2026-08-18T16:07:36] 任务创建: 36\n"
+            "[2026-08-18T16:07:36] 求解子进程启动\n"
+            "[2026-08-18T16:07:36] 开始计算排产方案...\n"
+            "[2026-08-18T16:07:36] 已找到一个排产方案，正在进一步计算搜索...\n"
+            "1. 读取输入数据...\n"
+            "   初解[auto:priority] objective=0\n"
+            "[2026-08-18T16:07:58] 任务已请求停止\n"
+            "[2026-08-18T16:07:58] 收到停止请求，正在导出当前最佳方案\n",
             encoding="utf-8",
         )
 
@@ -463,16 +468,27 @@ class ApiIntegrationTests(APITestCase):
         records = response.data["data"]
         self.assertEqual(
             [record["logContent"] for record in records],
-            ["第三条", "第二条", "第一条"],
+            [
+                "收到停止请求，正在导出当前最佳方案",
+                "任务已请求停止",
+                "已找到一个排产方案，正在进一步计算搜索...",
+                "开始计算排产方案...",
+                "求解子进程启动",
+                "任务创建: 36",
+            ],
         )
         self.assertEqual(
             [record["createTime"] for record in records],
             [
-                "2026-08-11 14:46:00+08:00",
-                "2026-08-11 14:45:00",
-                "2026-08-11 14:44:18",
+                "2026-08-18 16:07:58",
+                "2026-08-18 16:07:58",
+                "2026-08-18 16:07:36",
+                "2026-08-18 16:07:36",
+                "2026-08-18 16:07:36",
+                "2026-08-18 16:07:36",
             ],
         )
+        self.assertEqual([record["logId"] for record in records], [1, 2, 3, 4, 5, 6])
 
     def test_algorithm_adapter_prepares_inputs_and_maps_solver_parameters(self):
         from algorithm.adapter import submit_solver
@@ -740,10 +756,16 @@ class ApiIntegrationTests(APITestCase):
             },
             "solverTimeLimitMinutes": 20,
         }
-        blocked = self.client.post("/tdsms/solve/start", start_payload, format="json")
-        self.assertEqual(blocked.status_code, 409, blocked.data)
-        self.assertEqual(blocked.data["data"]["matchedCount"], 2)
-        self.assertEqual(blocked.data["data"]["unmatchedCount"], 1)
+        with patch("api.views.solve_views.submit_solver"):
+            started = self.client.post("/tdsms/solve/start", start_payload, format="json")
+        self.assertEqual(started.status_code, 200, started.data)
+        self.assertEqual(started.data["message"], "求解任务已创建")
+        solve = SolveTask.objects.get(solveTaskId=started.data["data"]["solveTaskId"])
+        self.assertEqual(solve.inputParams["unmatchedItemPolicy"], "BLOCK")
+        self.assertNotIn("matchedCount", started.data["data"])
+        self.assertNotIn("skippedCount", started.data["data"])
+        solve.solveStatus = 2
+        solve.save(update_fields=["solveStatus"])
 
         with patch("api.views.solve_views.submit_solver"):
             skipped = self.client.post(
@@ -751,26 +773,24 @@ class ApiIntegrationTests(APITestCase):
                 {**start_payload, "unmatchedItemPolicy": "SKIP"},
                 format="json",
             )
-        self.assertEqual(skipped.status_code, 202, skipped.data)
-        self.assertEqual(skipped.data["data"]["matchedCount"], 2)
-        self.assertEqual(skipped.data["data"]["skippedCount"], 1)
+        self.assertEqual(skipped.status_code, 200, skipped.data)
         solve = SolveTask.objects.get(solveTaskId=skipped.data["data"]["solveTaskId"])
         self.assertEqual(solve.inputParams["unmatchedItemPolicy"], "SKIP")
-        self.assertEqual(solve.inputParams["skippedCount"], 1)
+        self.assertNotIn("skippedCount", solve.inputParams)
         solve.solveStatus = 2
         solve.save(update_fields=["solveStatus"])
 
-        all_missing = self.client.post(
-            "/tdsms/solve/start",
-            {
-                **start_payload,
-                "department": "303车间",
-                "unmatchedItemPolicy": "SKIP",
-            },
-            format="json",
-        )
-        self.assertEqual(all_missing.status_code, 409, all_missing.data)
-        self.assertEqual(all_missing.data["data"]["matchedCount"], 0)
+        with patch("api.views.solve_views.submit_solver"):
+            all_missing = self.client.post(
+                "/tdsms/solve/start",
+                {
+                    **start_payload,
+                    "department": "303车间",
+                    "unmatchedItemPolicy": "SKIP",
+                },
+                format="json",
+            )
+        self.assertEqual(all_missing.status_code, 200, all_missing.data)
 
         self.client.credentials()
         self.login("user02", "123456")
@@ -1031,7 +1051,7 @@ class ApiIntegrationTests(APITestCase):
             }
 
         first = self.client.post("/tdsms/solve/start", payload(task.taskId), format="json")
-        self.assertEqual(first.status_code, 202, first.data)
+        self.assertEqual(first.status_code, 200, first.data)
         first_solve_id = first.data["data"]["solveTaskId"]
 
         another_task = TaskImportRecord.objects.create(
@@ -1047,7 +1067,7 @@ class ApiIntegrationTests(APITestCase):
             payload(another_task.taskId),
             format="json",
         )
-        self.assertEqual(replaced.status_code, 202, replaced.data)
+        self.assertEqual(replaced.status_code, 200, replaced.data)
         second_solve_id = replaced.data["data"]["solveTaskId"]
         self.assertNotEqual(second_solve_id, first_solve_id)
         self.assertEqual(SolveTask.objects.get(solveTaskId=first_solve_id).solveStatus, 4)
@@ -1087,6 +1107,6 @@ class ApiIntegrationTests(APITestCase):
             payload(other_task.taskId),
             format="json",
         )
-        self.assertEqual(other_started.status_code, 202, other_started.data)
+        self.assertEqual(other_started.status_code, 200, other_started.data)
         self.assertEqual(SolveTask.objects.get(solveTaskId=second_solve_id).solveStatus, 0)
         self.assertEqual(submit_solver_mock.call_count, 3)

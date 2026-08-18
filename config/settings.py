@@ -200,8 +200,9 @@ ALGORITHM_RUN_ROOT = os.getenv(
 os.makedirs(ALGORITHM_RUN_ROOT, exist_ok=True)
 ALGORITHM_INPUT_ROOT = os.getenv(
     'ALGORITHM_INPUT_ROOT',
-    os.path.join(BASE_DIR, 'media', 'algorithm_inputs'),
+    str(BASE_DIR.parent / 'algorithm_inputs'),
 )
+os.makedirs(ALGORITHM_INPUT_ROOT, exist_ok=True)
 # 同时进行中的求解子进程上限；默认等于 CPU 核数，可用环境变量覆盖
 _MAX_CONCURRENT_SOLVES_ENV = os.getenv('MAX_CONCURRENT_SOLVES', '').strip()
 MAX_CONCURRENT_SOLVES = (
