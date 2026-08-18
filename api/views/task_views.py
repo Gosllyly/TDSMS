@@ -18,7 +18,7 @@ def task_data(task):
     return {
         "taskId": task.taskId, "importId": task.taskId, "sourceType": task.sourceType,
         "sourceTaskId": task.sourceTask_id, "originalFileName": task.file.originalName,
-        "taskName": task.file.originalName,
+        "apsName": task.apsArchive.archiveName,
         "fileId": task.file_id,
         "apsArchive": {"archiveId": task.apsArchive_id, "archiveName": task.apsArchive.archiveName},
         "remark": task.remark, "dataCount": task.file.items.filter(isDeleted=0).count(),
@@ -71,7 +71,7 @@ class TaskHistoryImportView(APIView):
             raise NotFound("历史导入记录不存在")
         if source.apsArchive.isDeleted:
             raise ValidationError("该历史记录关联的APS方案已不存在，无法导入")
-        task = TaskImportRecord.objects.create(sourceType=2, sourceTask=source, apsArchive=source.apsArchive, file=source.file, remark=source.remark, importStatus=1, createdBy=request.user)
+        task = TaskImportRecord.objects.create(sourceType=2, sourceTask=source, apsArchive=source.apsArchive, file=source.file, remark="复用历史记录导入", importStatus=1, createdBy=request.user)
         return ApiResponse(task_data(task), message="历史记录导入成功")
 
 

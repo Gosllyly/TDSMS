@@ -211,7 +211,22 @@ def _solver_worker(task_id, task_dir_text, params):
                     _append_log(task_dir, str(message))
                     _update_status(task_dir, progressMessage=str(message))
 
-                result = _run_pipeline_for_task(task_dir, params, emit, stop_checker=stop_checker)
+                def on_result_exported(kind):
+                    visual_file = Path(_result_files(task_dir)["visualBoard"])
+                    if not visual_file.is_file():
+                        return
+                    _update_status(
+                        task_dir,
+                        resultReady=True,
+                        resultKind=kind,
+                        resultFiles=_result_files(task_dir),
+                    )
+
+                result = _run_pipeline_for_task(
+                    task_dir, params, emit,
+                    stop_checker=stop_checker,
+                    on_result_exported=on_result_exported,
+                )
                 status = _read_json(task_dir / "status.json")
                 if stop_checker():
                     visual_file = Path(_result_files(task_dir)["visualBoard"])
@@ -223,9 +238,10 @@ def _solver_worker(task_id, task_dir_text, params):
                         stopRequested=True,
                         stopMode="graceful",
                         resultReady=result_ready,
+                        resultKind="partial" if result_ready else None,
                         error=None if result_ready else "未生成可行解",
                         result=result,
-                        resultFiles=_result_files(task_dir),
+                        resultFiles=_result_files(task_dir) if result_ready else {},
                         progressMessage=(
                             "已停止搜索并输出当前最佳方案"
                             if result_ready else
@@ -237,15 +253,17 @@ def _solver_worker(task_id, task_dir_text, params):
                         "已停止搜索并输出当前最佳方案" if result_ready else "已停止搜索，未生成可行解",
                     )
                 elif status.get("status") != STATUS_STOPPED:
+                    visual_ready = Path(_result_files(task_dir)["visualBoard"]).exists()
                     _update_status(
                         task_dir,
                         status=STATUS_SUCCESS,
                         finishedAt=_now(),
                         error=None,
                         stopRequested=False,
-                        resultReady=Path(_result_files(task_dir)["visualBoard"]).exists(),
+                        resultReady=visual_ready,
+                        resultKind="final" if visual_ready else None,
                         result=result,
-                        resultFiles=_result_files(task_dir),
+                        resultFiles=_result_files(task_dir) if visual_ready else {},
                     )
                     _append_log(task_dir, "求解任务完成")
     except BaseException as exc:
@@ -256,7 +274,7 @@ def _solver_worker(task_id, task_dir_text, params):
         raise
 
 
-def _run_pipeline_for_task(task_dir, params, emit, stop_checker=None):
+def _run_pipeline_for_task(task_dir, params, emit, stop_checker=None, on_result_exported=None):
     options = params["options"]
     stage_seconds = options["stage_seconds"]
     raw_file = task_dir / "排产结果明细.xlsx"
@@ -282,6 +300,7 @@ def _run_pipeline_for_task(task_dir, params, emit, stop_checker=None):
         periodic_cleaning_time=options["periodic_cleaning_shifts"],
         stop_checker=stop_checker,
         department=options.get("department", "210车间"),
+        on_result_exported=on_result_exported,
     )
 
 
@@ -298,9 +317,10 @@ def _initial_status(task_id, task_dir, params):
         "stopRequested": False,
         "stopMode": None,
         "resultReady": False,
+        "resultKind": None,
         "paramsFile": str(task_dir / "params.json"),
         "logFile": str(task_dir / "solver.log"),
-        "resultFiles": _result_files(task_dir),
+        "resultFiles": {},
         "request": params,
     }
 

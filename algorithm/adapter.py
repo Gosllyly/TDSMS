@@ -199,9 +199,11 @@ def sync_solve_task(solve_or_id, cleanup=True):
     visual_path = (state.get("resultFiles") or {}).get("visualBoard")
     visual = Path(visual_path) if visual_path else None
     if visual and visual.is_file():
-        if state.get("status") == "SUCCESS":
+        kind = state.get("resultKind")
+        status = state.get("status")
+        if status == "SUCCESS" or kind == "final":
             solve.resultFilePath = str(visual)
-        elif state.get("status") == "STOPPED":
+        if status == "STOPPED" or kind == "partial":
             solve.partialResultFilePath = str(visual)
 
     solve.save(update_fields=[

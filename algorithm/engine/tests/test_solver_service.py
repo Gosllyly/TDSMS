@@ -269,6 +269,53 @@ class SolverServiceTaskTests(unittest.TestCase):
             self.assertTrue(status["stopRequested"])
             self.assertTrue(status["resultReady"])
 
+    def test_inline_worker_records_partial_result_only_after_visual_file_exists(self):
+        from solver_service import query_solver_status, run_solver
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_root = Path(tmp)
+            seen = {}
+
+            def fake_pipeline(**kwargs):
+                visual = Path(kwargs["visual_output_file"])
+                kwargs["on_result_exported"]("partial")
+                status_before = json.loads((visual.parent / "status.json").read_text(encoding="utf-8"))
+                seen["before"] = status_before
+                visual.write_text("visual", encoding="utf-8")
+                kwargs["on_result_exported"]("partial")
+                seen["after"] = json.loads((visual.parent / "status.json").read_text(encoding="utf-8"))
+                return {"final_objective": 1}
+
+            with mock.patch("solver_service.run_full_schedule_pipeline", side_effect=fake_pipeline):
+                result = run_solver(
+                    1003,
+                    "plan.xlsx",
+                    "aps.xlsx",
+                    "2026年08月",
+                    2,
+                    0.5,
+                    0.25,
+                    0.5,
+                    31,
+                    2,
+                    4,
+                    3,
+                    2,
+                    5,
+                    20,
+                    task_root=task_root,
+                    run_inline=True,
+                )
+
+            self.assertNotEqual(seen["before"].get("resultKind"), "partial")
+            self.assertFalse(seen["before"].get("resultFiles"))
+            self.assertEqual(seen["after"]["resultKind"], "partial")
+            self.assertTrue(seen["after"]["resultReady"])
+            self.assertTrue(seen["after"]["resultFiles"]["visualBoard"].endswith("可排产结果可视化.xlsx"))
+            status = query_solver_status(result["taskId"], task_root=task_root)
+            self.assertEqual(status["status"], "SUCCESS")
+            self.assertEqual(status["resultKind"], "final")
+
 
 class RunSchedulePipelineStopTests(unittest.TestCase):
     def test_solver_reports_clear_error_when_department_has_no_aps_matches(self):
@@ -346,6 +393,85 @@ class RunSchedulePipelineStopTests(unittest.TestCase):
         self.assertEqual(pack_clear.call_args.kwargs["department"], "Workshop-A")
         self.assertEqual(sunday.call_args.args[5], "Workshop-A")
         self.assertEqual(visual.call_args.args[5], "Workshop-A")
+
+    def test_solver_exports_first_solution_before_search_and_final_after(self):
+        from run_schedule_hybrid import _solve_pharmaceutical_schedule_cp_hybrid_impl
+
+        exports = []
+
+        def fake_inputs(*args, **kwargs):
+            return (
+                ["item-1"], ["mix-1"], ["tab-1"], ["coat-1"], ["pack-1"],
+                {"item-1": [1]}, {}, {}, {}, {}, {}, {}, {}, {},
+                {}, {}, {}, {}, 11,
+            )
+
+        def fake_pool(*args, **kwargs):
+            return 10, "auto:risk", {"t1": {("item-1", 1): 0}}
+
+        def fake_alns(*args, **kwargs):
+            self.assertEqual(exports, ["partial"])
+            return {"t1": {("item-1", 1): 1}}, None, None, 8
+
+        def fake_exporter(snapshot, kind, model_data):
+            exports.append(kind)
+
+        logger = mock.Mock()
+        with mock.patch("run_schedule_hybrid.core.build_schedule_inputs", side_effect=fake_inputs), mock.patch(
+            "run_schedule_hybrid._build_initial_pool", side_effect=fake_pool
+        ), mock.patch("run_schedule_hybrid.core._run_alns", side_effect=fake_alns), mock.patch(
+            "run_schedule_hybrid.core._left_shift_pack_snapshot",
+            return_value=({"t1": {("item-1", 1): 1}}, 8, []),
+        ), mock.patch(
+            "run_schedule_hybrid.core._build_model",
+            return_value={"model": mock.Mock(), "vars": {"t1": {}, "t4": {}, "x4": {}, "E": {}}},
+        ), mock.patch("run_schedule_hybrid.core._add_snapshot_hints"), mock.patch(
+            "run_schedule_hybrid.core._snapshot_to_name_map", return_value={}
+        ), mock.patch("run_schedule_hybrid.core._SnapshotValueSolver"):
+            result = _solve_pharmaceutical_schedule_cp_hybrid_impl(
+                "plan.xlsx",
+                "aps.xlsx",
+                stage1_sec=1,
+                stage2_sec=0,
+                cp_sec=0,
+                progress_logger=logger,
+                result_exporter=fake_exporter,
+            )
+
+        self.assertEqual(exports, ["partial", "final"])
+        self.assertTrue(result["files_exported"])
+        logger.on_first_solution_found.assert_called_once()
+        logger.on_time_limit.assert_called_once()
+
+    def test_pipeline_skips_fallback_postprocess_when_solver_already_exported(self):
+        from run_schedule_hybrid import run_full_schedule_pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp)
+
+            def fake_solve(*args, **kwargs):
+                self.assertIsNotNone(kwargs.get("result_exporter"))
+                return {"stopped": False, "result_ready": True, "files_exported": True}
+
+            with mock.patch(
+                "run_schedule_hybrid.solve_pharmaceutical_schedule_cp_hybrid",
+                side_effect=fake_solve,
+            ), mock.patch("run_schedule_hybrid.postprocess_pack_clear") as pack_clear, mock.patch(
+                "run_schedule_hybrid.postprocess_detail_for_sundays"
+            ) as sunday, mock.patch("run_schedule_hybrid.generate_template_schedule_board") as visual:
+                run_full_schedule_pipeline(
+                    plan_file="plan.xlsx",
+                    aps_file="aps.xlsx",
+                    schedule_month="2026-08",
+                    raw_output_file=task_dir / "raw.xlsx",
+                    pack_clear_output_file=task_dir / "pack.xlsx",
+                    sunday_rest_output_file=task_dir / "sunday.xlsx",
+                    visual_output_file=task_dir / "visual.xlsx",
+                )
+
+        pack_clear.assert_not_called()
+        sunday.assert_not_called()
+        visual.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -82,6 +82,31 @@ class ApiIntegrationTests(APITestCase):
                 return department
         self.fail("测试模板中不存在可与APS档案匹配的部门")
 
+    def create_solve_record(self, **solve_kwargs):
+        self.login()
+        archive = ApsArchive.objects.create(archiveName="测试档案", createdBy=self.user)
+        upload = UploadFile.objects.create(
+            originalName="plan.xlsx",
+            fileName="plan.xlsx",
+            filePath="plan.xlsx",
+            uploadUser=self.user,
+            parseStatus=1,
+        )
+        task = TaskImportRecord.objects.create(
+            apsArchive=archive,
+            file=upload,
+            importStatus=1,
+            createdBy=self.user,
+        )
+        fields = {
+            "task": task,
+            "createdUser": self.user,
+            "inputParams": {},
+            "solveStatus": 1,
+        }
+        fields.update(solve_kwargs)
+        return SolveTask.objects.create(**fields)
+
     def test_authentication_and_admin_permission(self):
         response = self.login()
         self.assertEqual(response.data["data"]["userInfo"]["role"], "user")
@@ -364,6 +389,9 @@ class ApiIntegrationTests(APITestCase):
             "正在计算搜索...",
             [record["logContent"] for record in logs.data["data"]],
         )
+        for record in logs.data["data"]:
+            if record["createTime"]:
+                self.assertNotIn("T", record["createTime"])
         status_response = self.client.get("/tdsms/solve/query", {"solveTaskId": solve_id})
         self.assertEqual(status_response.data["data"]["solveStatus"], 0)
         stop_solver_mock.return_value = {"taskId": solve_id, "status": "STOPPING"}
@@ -371,6 +399,34 @@ class ApiIntegrationTests(APITestCase):
         self.assertEqual(stopped.status_code, 202)
         self.assertTrue(stopped.data["data"]["stopRequested"])
         self.assertEqual(SolveTask.objects.get(solveTaskId=solve_id).solveStatus, 0)
+
+    def test_solve_logs_normalizes_create_time_and_returns_newest_first(self):
+        solve = self.create_solve_record()
+        run_dir = Path(settings.ALGORITHM_RUN_ROOT) / str(solve.solveTaskId)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "solver.log").write_text(
+            "[2026-08-11T14:44:18] 第一条\n"
+            "[2026-08-11T14:45:00] 第二条\n"
+            "2026-08-11T14:46:00+08:00\t第三条\n",
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/tdsms/solve/logs", {"solveTaskId": solve.solveTaskId})
+
+        self.assertEqual(response.status_code, 200, response.data)
+        records = response.data["data"]
+        self.assertEqual(
+            [record["logContent"] for record in records],
+            ["第三条", "第二条", "第一条"],
+        )
+        self.assertEqual(
+            [record["createTime"] for record in records],
+            [
+                "2026-08-11 14:46:00+08:00",
+                "2026-08-11 14:45:00",
+                "2026-08-11 14:44:18",
+            ],
+        )
 
     def test_algorithm_adapter_prepares_inputs_and_maps_solver_parameters(self):
         from algorithm.adapter import submit_solver
@@ -682,6 +738,109 @@ class ApiIntegrationTests(APITestCase):
         self.assertEqual(solve.solveStatus, 4)
         self.assertEqual(solve.finishReason, 3)
         self.assertEqual(solve.partialResultFilePath, str(visual))
+
+    def test_running_partial_result_is_saved_only_after_visual_file_exists(self):
+        from algorithm.adapter import sync_solve_task
+
+        solve = self.create_solve_record()
+        run_dir = Path(settings.ALGORITHM_RUN_ROOT) / str(solve.solveTaskId)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        visual = run_dir / "可排产结果可视化.xlsx"
+        visual.unlink(missing_ok=True)
+        engine = Mock()
+        engine.query_solver_status.return_value = {
+            "taskId": str(solve.solveTaskId),
+            "status": "RUNNING",
+            "resultReady": True,
+            "resultKind": "partial",
+            "resultFiles": {"visualBoard": str(visual)},
+        }
+
+        with patch("algorithm.adapter._engine_service", return_value=engine):
+            sync_solve_task(solve, cleanup=False)
+
+        solve.refresh_from_db()
+        self.assertFalse(solve.partialResultFilePath)
+        self.assertFalse(solve.resultFilePath)
+
+        visual.write_bytes(b"result")
+        with patch("algorithm.adapter._engine_service", return_value=engine):
+            sync_solve_task(solve, cleanup=False)
+
+        solve.refresh_from_db()
+        self.assertEqual(solve.partialResultFilePath, str(visual))
+        self.assertFalse(solve.resultFilePath)
+
+        engine.query_solver_status.return_value.update({
+            "status": "SUCCESS",
+            "finishedAt": "2026-08-18T12:00:00",
+            "resultKind": "final",
+            "result": {"cp_status": "FEASIBLE"},
+        })
+        with patch("algorithm.adapter._engine_service", return_value=engine):
+            sync_solve_task(solve, cleanup=False)
+
+        solve.refresh_from_db()
+        self.assertEqual(solve.resultFilePath, str(visual))
+
+    def test_solve_query_flags_require_generated_result_files(self):
+        solve = self.create_solve_record(
+            partialResultFilePath=r"C:\missing\partial-result.xlsx",
+            resultFilePath=r"C:\missing\final-result.xlsx",
+        )
+
+        with patch("api.views.solve_views.sync_solve_task", return_value=(solve, None)):
+            response = self.client.get("/tdsms/solve/query", {"solveTaskId": solve.solveTaskId})
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data["data"]["hasPartialResult"])
+        self.assertFalse(response.data["data"]["hasFinalResult"])
+
+        run_dir = Path(settings.ALGORITHM_RUN_ROOT) / str(solve.solveTaskId)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        visual = run_dir / "可排产结果可视化.xlsx"
+        visual.write_bytes(b"result")
+        solve.partialResultFilePath = str(visual)
+        solve.resultFilePath = None
+        solve.save(update_fields=["partialResultFilePath", "resultFilePath"])
+
+        with patch("api.views.solve_views.sync_solve_task", return_value=(solve, None)):
+            response = self.client.get("/tdsms/solve/query", {"solveTaskId": solve.solveTaskId})
+
+        self.assertTrue(response.data["data"]["hasPartialResult"])
+        self.assertFalse(response.data["data"]["hasFinalResult"])
+
+        solve.resultFilePath = str(visual)
+        solve.save(update_fields=["resultFilePath"])
+        with patch("api.views.solve_views.sync_solve_task", return_value=(solve, None)):
+            response = self.client.get("/tdsms/solve/query", {"solveTaskId": solve.solveTaskId})
+
+        self.assertTrue(response.data["data"]["hasPartialResult"])
+        self.assertTrue(response.data["data"]["hasFinalResult"])
+
+    def test_result_download_allows_running_task_after_partial_file_is_generated(self):
+        visual = Path(self.temp_dir) / "partial-visual.xlsx"
+        visual.write_bytes(b"partial-result")
+        solve = self.create_solve_record(partialResultFilePath=str(visual))
+        state = {"status": "RUNNING", "resultKind": "partial", "resultReady": True}
+
+        with patch("api.views.solve_views.sync_solve_task", return_value=(solve, state)):
+            response = self.client.post(
+                "/tdsms/solve/result",
+                {"solveTaskId": solve.solveTaskId},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            "可排产结果可视化.xlsx",
+            unquote(response.headers["Content-Disposition"]),
+        )
+        self.assertEqual(
+            response.headers["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertEqual(b"".join(response.streaming_content), b"partial-result")
 
     def test_export_returns_conflict_while_stopped_result_is_being_generated(self):
         task = self.create_task()

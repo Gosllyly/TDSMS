@@ -513,11 +513,18 @@ def _add_snapshot_hints(model, vars_dict, snapshot):
 
 
 class _SnapshotValueSolver:
-    def __init__(self, name_map):
-        self._name_map = name_map
+    def __init__(self, name_map=None):
+        self._name_map = name_map or {}
 
     def Value(self, var):
+        if not hasattr(var, "Name"):
+            return 0 if var is None else var
         return self._name_map[var.Name()]
+
+
+class _DefaultZeroDict(dict):
+    def __getitem__(self, key):
+        return self.get(key, 0)
 
 
 def _snapshot_to_name_map(vars_dict, snapshot):
@@ -1703,6 +1710,24 @@ def results_to_excel_cp(
         pd.DataFrame(batch_records).to_excel(writer, sheet_name="批次工序计划", index=False)
         pd.DataFrame(drug_records).to_excel(writer, sheet_name="包装及摘要", index=False)
         pd.DataFrame(clear_records).to_excel(writer, sheet_name="设备清场明细", index=False)
+
+
+def results_to_excel_from_snapshot(
+    I, B, J1, J2, J3, J4, p1, p2, p3, p4, T, snapshot, scale, w, filename,
+    clear_time_matrices=None, max_continuous_run=None, periodic_cleaning_time=1.0
+):
+    vars_dict = {
+        key: _DefaultZeroDict(value)
+        for key, value in snapshot.items()
+        if isinstance(value, dict)
+    }
+    results_to_excel_cp(
+        I, B, J1, J2, J3, J4, p1, p2, p3, p4, T,
+        vars_dict, _SnapshotValueSolver(), scale, w, filename,
+        clear_time_matrices=clear_time_matrices,
+        max_continuous_run=max_continuous_run,
+        periodic_cleaning_time=periodic_cleaning_time,
+    )
 
 
 def solve_pharmaceutical_schedule_cp(

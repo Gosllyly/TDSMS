@@ -181,7 +181,12 @@ class SolveLogsView(APIView):
         if path.is_file():
             for index, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
                 created, content = parse_log_line(line)
-                logs.append({"logId": index, "logContent": content, "createTime": created})
+                logs.append({
+                    "logId": index,
+                    "logContent": content,
+                    "createTime": created.replace("T", " ", 1) if created else created,
+                })
+            logs.sort(key=lambda item: item["createTime"] or "", reverse=True)
         return ApiResponse(logs, message="查询成功")
 
 
@@ -199,7 +204,7 @@ class SolveStopView(APIView):
                 "solveTaskId": solve.solveTaskId,
                 "solveStatus": solve.solveStatus,
                 "stopRequested": True,
-                "hasPartialResult": False,
+                "hasPartialResult": bool(solve.partialResultFilePath and Path(solve.partialResultFilePath).is_file()),
             },
             status=status.HTTP_202_ACCEPTED,
             message="停止请求已接收，系统正在生成当前最优结果",
@@ -211,9 +216,9 @@ class SolveResultView(APIView):
         solve_id = get_request_params(request).get("solveTaskId")
         solve = get_owned_solve(request.user, solve_id)
         solve, algorithm_state = sync_solve_task(solve)
-        if solve.solveStatus == 2:
+        if solve.solveStatus == 2 and solve.resultFilePath:
             file_path = solve.resultFilePath
-        elif solve.solveStatus == 4:
+        elif solve.partialResultFilePath:
             file_path = solve.partialResultFilePath
         elif algorithm_state and algorithm_state.get("stopRequested"):
             return ApiResponse(
@@ -233,4 +238,8 @@ class SolveResultView(APIView):
                 else "结果文件不存在"
             )
             return ApiResponse(status=status.HTTP_409_CONFLICT, message=message)
-        return attachment_file_response(open(path, "rb"), path.name)
+        return attachment_file_response(
+            open(path, "rb"),
+            "可排产结果可视化.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )

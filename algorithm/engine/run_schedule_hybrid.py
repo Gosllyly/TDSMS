@@ -103,6 +103,7 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
     periodic_cleaning_time=1.0,
     stop_checker=None,
     department="210车间",
+    result_exporter=None,
 ):
     print("1. 读取输入数据...")
     (
@@ -146,6 +147,7 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
             "cp_status": "UNKNOWN",
             "stopped": True,
             "result_ready": False,
+            "files_exported": False,
             "stop_stage": "initial",
         }
 
@@ -158,6 +160,13 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
     )
     progress_logger.on_first_solution_found()
     print(f"   选用初解={initial_mode}, objective={initial_obj}, time={time.time() - t0:.2f}s")
+    model_data = _snapshot_export_model_data(
+        I, J1, J2, J3, J4, B, p1, p2, p3, p4, T, w, scale,
+        clear_time_matrices, max_continuous_run,
+    )
+    files_exported = _export_snapshot_if_needed(
+        result_exporter, initial_snapshot, "partial", model_data,
+    )
 
     seed_list = list(seeds) if seeds else [17]
     best_snapshot = initial_snapshot
@@ -300,14 +309,21 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
     total_time = time.time() - t0
     print(f"6. 采用最优seed={final_seed}, objective={final_obj}, total_time={total_time:.2f}s")
 
-    core.results_to_excel_cp(
-        I, B, J1, J2, J3, J4, p1, p2, p3, p4, T,
-        vars_dict, final_solver, scale, w, output_file,
-        clear_time_matrices=clear_time_matrices,
-        max_continuous_run=max_continuous_run,
-        periodic_cleaning_time=periodic_cleaning_time,
-    )
-    print(f"已导出: {output_file}")
+    result_kind = "partial" if stopped else "final"
+    if result_exporter is not None:
+        files_exported = _export_snapshot_if_needed(
+            result_exporter, final_snapshot, result_kind, model_data,
+        ) or files_exported
+    else:
+        core.results_to_excel_cp(
+            I, B, J1, J2, J3, J4, p1, p2, p3, p4, T,
+            vars_dict, final_solver, scale, w, output_file,
+            clear_time_matrices=clear_time_matrices,
+            max_continuous_run=max_continuous_run,
+            periodic_cleaning_time=periodic_cleaning_time,
+        )
+        print(f"已导出: {output_file}")
+        files_exported = True
 
     if stopped:
         progress_logger.on_stopped_with_result()
@@ -325,6 +341,7 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
         "cp_status": status_map.get(cp_status, cp_status),
         "stopped": stopped,
         "result_ready": True,
+        "files_exported": bool(files_exported),
         "stop_stage": stop_stage,
     }
 
@@ -352,6 +369,7 @@ def solve_pharmaceutical_schedule_cp_hybrid(
     periodic_cleaning_time=1.0,
     stop_checker=None,
     department="210车间",
+    result_exporter=None,
 ):
     progress_logger = progress_logger or ScheduleSolveProgressLogger(
         interval_seconds=progress_interval_seconds,
@@ -382,6 +400,7 @@ def solve_pharmaceutical_schedule_cp_hybrid(
             periodic_cleaning_time=periodic_cleaning_time,
             stop_checker=stop_checker,
             department=department,
+            result_exporter=result_exporter,
         )
     except Exception:
         progress_logger.on_exception()
@@ -392,6 +411,68 @@ def _delete_if_exists(file_path):
     path = Path(file_path)
     if path.exists():
         path.unlink()
+
+
+def _snapshot_export_model_data(
+    I, J1, J2, J3, J4, B, p1, p2, p3, p4, T, w, scale,
+    clear_time_matrices, max_continuous_run,
+):
+    return {
+        "I": I, "J1": J1, "J2": J2, "J3": J3, "J4": J4, "B": B,
+        "p1": p1, "p2": p2, "p3": p3, "p4": p4, "T": T, "w": w, "scale": scale,
+        "clear_time_matrices": clear_time_matrices,
+        "max_continuous_run": max_continuous_run,
+    }
+
+
+def _export_snapshot_if_needed(result_exporter, snapshot, kind, model_data):
+    if result_exporter is None or snapshot is None:
+        return False
+    result_exporter(snapshot, kind, model_data)
+    return True
+
+
+def _export_solution_bundle(snapshot, kind, model_data, export_spec):
+    core.results_to_excel_from_snapshot(
+        model_data["I"], model_data["B"], model_data["J1"], model_data["J2"],
+        model_data["J3"], model_data["J4"], model_data["p1"], model_data["p2"],
+        model_data["p3"], model_data["p4"], model_data["T"], snapshot,
+        model_data["scale"], model_data["w"], export_spec["raw_output_file"],
+        clear_time_matrices=model_data["clear_time_matrices"],
+        max_continuous_run=model_data["max_continuous_run"],
+        periodic_cleaning_time=export_spec["periodic_cleaning_time"],
+    )
+    print(f"已导出: {export_spec['raw_output_file']}")
+    postprocess_pack_clear(
+        export_spec["raw_output_file"],
+        export_spec["pack_clear_output_file"],
+        export_spec["plan_file"],
+        export_spec["aps_file"],
+        max_run=export_spec["max_run"],
+        clear_duration=export_spec["periodic_cleaning_time"],
+        minor_cleaning_time_override=export_spec["minor_cleaning_time_override"],
+        department=export_spec["department"],
+    )
+    postprocess_detail_for_sundays(
+        export_spec["pack_clear_output_file"],
+        export_spec["sunday_rest_output_file"],
+        export_spec["plan_file"],
+        export_spec["aps_file"],
+        export_spec["schedule_start_date"],
+        export_spec["department"],
+    )
+    visual_file = generate_template_schedule_board(
+        export_spec["sunday_rest_output_file"],
+        export_spec["plan_file"],
+        export_spec["aps_file"],
+        export_spec["visual_output_file"],
+        export_spec["schedule_start_date"],
+        export_spec["department"],
+    )
+    callback = export_spec.get("on_result_exported")
+    if callback:
+        callback(kind)
+    return visual_file
 
 
 def _coerce_schedule_start_date(schedule_month):
@@ -431,10 +512,29 @@ def run_full_schedule_pipeline(
     periodic_cleaning_time=1.0,
     stop_checker=None,
     department="210车间",
+    on_result_exported=None,
 ):
     schedule_start_date = _coerce_schedule_start_date(schedule_month)
     if initial_solution_mode in ("excel", "best") and initial_solution_file is None:
         initial_solution_file = str(Path(__file__).resolve().parent / "initial_solution.xlsx")
+
+    export_spec = {
+        "plan_file": plan_file,
+        "aps_file": aps_file,
+        "raw_output_file": raw_output_file,
+        "pack_clear_output_file": pack_clear_output_file,
+        "sunday_rest_output_file": sunday_rest_output_file,
+        "visual_output_file": visual_output_file,
+        "schedule_start_date": schedule_start_date,
+        "max_run": max_continuous_run_override if max_continuous_run_override is not None else 11.0,
+        "periodic_cleaning_time": periodic_cleaning_time,
+        "minor_cleaning_time_override": minor_cleaning_time_override,
+        "department": department,
+        "on_result_exported": on_result_exported,
+    }
+
+    def result_exporter(snapshot, kind, model_data):
+        _export_solution_bundle(snapshot, kind, model_data, export_spec)
 
     solve_result = solve_pharmaceutical_schedule_cp_hybrid(
         plan_file,
@@ -457,6 +557,7 @@ def run_full_schedule_pipeline(
         periodic_cleaning_time=periodic_cleaning_time,
         stop_checker=stop_checker,
         department=department,
+        result_exporter=result_exporter,
     )
     if not solve_result.get("result_ready", True):
         return {
@@ -467,32 +568,37 @@ def run_full_schedule_pipeline(
             "visual_output_file": None,
         }
 
-    postprocess_pack_clear(
-        raw_output_file,
-        pack_clear_output_file,
-        plan_file,
-        aps_file,
-        max_run=max_continuous_run_override if max_continuous_run_override is not None else 11.0,
-        clear_duration=periodic_cleaning_time,
-        minor_cleaning_time_override=minor_cleaning_time_override,
-        department=department,
-    )
-    postprocess_detail_for_sundays(
-        pack_clear_output_file,
-        sunday_rest_output_file,
-        plan_file,
-        aps_file,
-        schedule_start_date,
-        department,
-    )
-    visual_file = generate_template_schedule_board(
-        sunday_rest_output_file,
-        plan_file,
-        aps_file,
-        visual_output_file,
-        schedule_start_date,
-        department,
-    )
+    if not solve_result.get("files_exported"):
+        postprocess_pack_clear(
+            raw_output_file,
+            pack_clear_output_file,
+            plan_file,
+            aps_file,
+            max_run=max_continuous_run_override if max_continuous_run_override is not None else 11.0,
+            clear_duration=periodic_cleaning_time,
+            minor_cleaning_time_override=minor_cleaning_time_override,
+            department=department,
+        )
+        postprocess_detail_for_sundays(
+            pack_clear_output_file,
+            sunday_rest_output_file,
+            plan_file,
+            aps_file,
+            schedule_start_date,
+            department,
+        )
+        visual_file = generate_template_schedule_board(
+            sunday_rest_output_file,
+            plan_file,
+            aps_file,
+            visual_output_file,
+            schedule_start_date,
+            department,
+        )
+        if on_result_exported:
+            on_result_exported("final" if not solve_result.get("stopped") else "partial")
+    else:
+        visual_file = visual_output_file
     return {
         **solve_result,
         "raw_output_file": str(raw_output_file),
