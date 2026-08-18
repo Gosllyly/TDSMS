@@ -4,12 +4,11 @@ from pathlib import Path
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
-from django.http import FileResponse
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.views import APIView
 
 from api.serializers import HistoryImportSerializer
-from api.utils import ApiResponse, get_request_params
+from api.utils import ApiResponse, attachment_file_response, get_request_params
 from api.views.common import format_datetime, json_value, paginate
 from core.models import ApsArchive, TaskImportRecord, UploadFile, UploadFileItem
 from services.excel_service import ExcelValidationError, parse_plan_file
@@ -40,7 +39,7 @@ def plan_item_data(item):
 class TaskTemplateView(APIView):
     def get(self, request):
         path = Path(settings.MEDIA_ROOT) / "templates" / "药业车间分解编排计划表模板.xlsx"
-        return FileResponse(open(path, "rb"), as_attachment=True, filename=path.name)
+        return attachment_file_response(open(path, "rb"), path.name)
 
 
 class TaskHistoryView(APIView):

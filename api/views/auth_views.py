@@ -9,7 +9,7 @@ from rest_framework.exceptions import AuthenticationFailed, NotFound, Validation
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 
-from api.authentication import build_jwt_for_user, is_valid_login_token
+from api.authentication import build_jwt_for_user
 from api.permissions import IsAdmin
 from api.serializers import AdminCreateSerializer, AdminExpireSerializer, AdminStatusSerializer, LoginSerializer
 from api.utils import ApiResponse, get_request_params
@@ -52,12 +52,8 @@ class LoginView(APIView):
                 return ApiResponse(None, status.HTTP_403_FORBIDDEN, "该账户已被禁用，请联系管理员")
             if user.expireTime and user.expireTime < timezone.now():
                 return ApiResponse(None, status.HTTP_403_FORBIDDEN, "当前账户已超过有效期，无法登录")
-            if is_valid_login_token(user, user.loginToken):
-                return ApiResponse(
-                    status=status.HTTP_409_CONFLICT,
-                    message="当前账号已经登录，请勿重复登录",
-                )
 
+            # 允许重复登录：每次登录都生成新 token 并覆盖写入数据库
             token = build_jwt_for_user(user)
             user.loginToken = token
             user.lastLoginTime = timezone.now()
@@ -69,9 +65,9 @@ class LogoutView(APIView):
     def post(self, request):
         with transaction.atomic():
             user = SysUser.objects.select_for_update().get(userId=request.user.userId)
-            if user.loginToken == request.auth:
-                user.loginToken = None
-                user.save(update_fields=["loginToken", "updateTime"])
+            # 登出时清空数据库中的 token
+            user.loginToken = None
+            user.save(update_fields=["loginToken", "updateTime"])
         return ApiResponse(message="退出登录成功")
 
 

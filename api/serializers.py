@@ -65,12 +65,35 @@ class ApsArchiveItemCreateSerializer(serializers.Serializer):
 
 class ApsArchiveItemBatchDeleteSerializer(serializers.Serializer):
     archiveId = serializers.IntegerField(min_value=1)
+    batchMode = serializers.BooleanField()
+    itemId = serializers.IntegerField(min_value=1, required=False, allow_null=True)
     productNames = serializers.ListField(
-        child=serializers.CharField(max_length=100), allow_empty=False, min_length=1,
+        child=serializers.CharField(max_length=100),
+        required=False,
+        allow_empty=True,
+        allow_null=True,
     )
 
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, "copy") else dict(data)
+        if data.get("itemId") in ("", []):
+            data["itemId"] = None
+        if data.get("productNames") in ("", None):
+            data["productNames"] = []
+        return super().to_internal_value(data)
+
     def validate_productNames(self, values):
+        if not values:
+            return []
         return list(dict.fromkeys(values))
+
+    def validate(self, attrs):
+        if attrs["batchMode"]:
+            if not attrs.get("productNames"):
+                raise serializers.ValidationError({"productNames": "批量删除时productNames不能为空"})
+        elif not attrs.get("itemId"):
+            raise serializers.ValidationError({"itemId": "单个删除时itemId不能为空"})
+        return attrs
 
 
 class SolveStartSerializer(serializers.Serializer):

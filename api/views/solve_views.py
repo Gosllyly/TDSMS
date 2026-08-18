@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from django.db import transaction
-from django.http import FileResponse
 from rest_framework import status
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.views import APIView
@@ -14,7 +13,7 @@ from algorithm.adapter import (
     sync_solve_task,
 )
 from api.serializers import SolveMatchCheckSerializer, SolveStartSerializer
-from api.utils import ApiResponse, get_request_params
+from api.utils import ApiResponse, attachment_file_response, get_request_params
 from api.views.common import format_datetime
 from core.models import SolveTask, TaskImportRecord
 from services.solve_match_service import compare_task_plan_with_aps
@@ -234,4 +233,4 @@ class SolveResultView(APIView):
                 else "结果文件不存在"
             )
             return ApiResponse(status=status.HTTP_409_CONFLICT, message=message)
-        return FileResponse(open(path, "rb"), as_attachment=True, filename=path.name)
+        return attachment_file_response(open(path, "rb"), path.name)

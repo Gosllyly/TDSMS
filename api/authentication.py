@@ -1,5 +1,4 @@
 from datetime import timedelta
-import hmac
 from uuid import uuid4
 
 import jwt
@@ -41,8 +40,12 @@ class Authentication(authentication.BaseAuthentication):
             raise AuthenticationFailed("登录状态已失效，请重新登录")
         if user.expireTime and user.expireTime < timezone.now():
             raise AuthenticationFailed("登录状态已失效，请重新登录")
-        if not user.loginToken or not hmac.compare_digest(user.loginToken, token):
+        # 数据库无 token：已登出或未登录
+        if not user.loginToken:
             raise AuthenticationFailed("登录状态已失效，请重新登录")
+        # 前端 token 与库中不一致：账号已在别处重新登录
+        if user.loginToken != token:
+            raise AuthenticationFailed("账号已被登陆，请重新登陆")
         return user, token
 
 
@@ -52,16 +55,6 @@ def decode_jwt_token(token):
         settings.JWT_SECRET_KEY,
         algorithms=[settings.JWT_ALGORITHM],
     )
-
-
-def is_valid_login_token(user, token):
-    if not token:
-        return False
-    try:
-        payload = decode_jwt_token(token)
-    except jwt.PyJWTError:
-        return False
-    return payload.get("userId") == user.userId
 
 
 def build_jwt_for_user(user):

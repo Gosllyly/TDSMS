@@ -277,13 +277,22 @@ class ApiIntegrationTests(APITestCase):
         created_second = self.client.post("/tdsms/aps/itemCreate", second, format="json")
         self.assertEqual(created_second.status_code, 200, created_second.data)
 
+        single_deleted = self.client.post("/tdsms/aps/itemDelete", {
+            "batchMode": False,
+            "archiveId": archive.archiveId,
+            "itemId": created.data["data"]["itemId"],
+        }, format="json")
+        self.assertEqual(single_deleted.status_code, 200, single_deleted.data)
+        self.assertEqual(single_deleted.data["data"]["itemId"], created.data["data"]["itemId"])
+
         deleted = self.client.post("/tdsms/aps/itemDelete", {
+            "batchMode": True,
             "archiveId": archive.archiveId,
             "productNames": ["接口测试品种", "接口测试品种", "不存在品种"],
         }, format="json")
         self.assertEqual(deleted.status_code, 200, deleted.data)
         self.assertEqual(deleted.data["data"]["deletedProductCount"], 1)
-        self.assertEqual(deleted.data["data"]["deletedItemCount"], 2)
+        self.assertEqual(deleted.data["data"]["deletedItemCount"], 1)
         self.assertEqual(deleted.data["data"]["productNames"], ["接口测试品种"])
 
         exported = self.client.get("/tdsms/aps/export", {"archiveId": archive.archiveId})

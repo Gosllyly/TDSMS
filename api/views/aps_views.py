@@ -4,12 +4,11 @@ import re
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
-from django.http import FileResponse
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.views import APIView
 
 from api.serializers import ApsArchiveItemBatchDeleteSerializer, ApsArchiveItemCreateSerializer
-from api.utils import ApiResponse, get_request_params
+from api.utils import ApiResponse, attachment_file_response, get_request_params
 from api.views.common import format_datetime, json_value
 from core.models import ApsArchive, ApsArchiveItem
 from services.aps_export_service import export_aps_archive
@@ -33,7 +32,7 @@ def item_data(item):
 class ApsTemplateView(APIView):
     def get(self, request):
         path = Path(settings.MEDIA_ROOT) / "templates" / "APS排产信息模板.xlsx"
-        return FileResponse(open(path, "rb"), as_attachment=True, filename=path.name)
+        return attachment_file_response(open(path, "rb"), path.name)
 
 
 class ApsListView(APIView):
@@ -120,21 +119,38 @@ class ApsItemDeleteView(APIView):
         if not archive:
             raise NotFound("APS方案不存在")
 
-        requested_names = data["productNames"]
-        queryset = ApsArchiveItem.objects.filter(
-            archive=archive, productName__in=requested_names, isDeleted=0
-        )
-        matched_names = set(queryset.values_list("productName", flat=True).distinct())
-        deleted_names = [name for name in requested_names if name in matched_names]
+        if data["batchMode"]:
+            requested_names = data["productNames"]
+            queryset = ApsArchiveItem.objects.filter(
+                archive=archive, productName__in=requested_names, isDeleted=0
+            )
+            matched_names = set(queryset.values_list("productName", flat=True).distinct())
+            deleted_names = [name for name in requested_names if name in matched_names]
+            with transaction.atomic():
+                deleted_count = queryset.update(isDeleted=1)
+                if deleted_count:
+                    archive.save(update_fields=["updateTime"])
+            return ApiResponse({
+                "batchMode": True,
+                "deletedProductCount": len(deleted_names),
+                "deletedItemCount": deleted_count,
+                "productNames": deleted_names,
+            }, message="批量删除成功")
+
+        item = ApsArchiveItem.objects.filter(
+            archive=archive, itemId=data["itemId"], isDeleted=0
+        ).first()
+        if not item:
+            raise NotFound("APS明细不存在")
         with transaction.atomic():
-            deleted_count = queryset.update(isDeleted=1)
-            if deleted_count:
-                archive.save(update_fields=["updateTime"])
+            item.isDeleted = 1
+            item.save(update_fields=["isDeleted"])
+            archive.save(update_fields=["updateTime"])
         return ApiResponse({
-            "deletedProductCount": len(deleted_names),
-            "deletedItemCount": deleted_count,
-            "productNames": deleted_names,
-        }, message="批量删除成功")
+            "batchMode": False,
+            "archiveId": archive.archiveId,
+            "itemId": item.itemId,
+        }, message="删除成功")
 
 
 class ApsExportView(APIView):
@@ -150,9 +166,8 @@ class ApsExportView(APIView):
         items = ApsArchiveItem.objects.filter(archive=archive, isDeleted=0).order_by("itemId")
         stream = export_aps_archive(items)
         safe_name = re.sub(r'[\\/:*?"<>|]+', "_", archive.archiveName).strip() or f"APS方案{archive.archiveId}"
-        return FileResponse(
+        return attachment_file_response(
             stream,
-            as_attachment=True,
-            filename=f"{safe_name}_APS排产信息.xlsx",
+            f"{safe_name}_APS排产信息.xlsx",
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
