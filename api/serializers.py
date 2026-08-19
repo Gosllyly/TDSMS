@@ -63,6 +63,28 @@ class ApsArchiveItemCreateSerializer(serializers.Serializer):
         return attrs
 
 
+class ApsArchiveItemUpdateSerializer(ApsArchiveItemCreateSerializer):
+    itemId = serializers.IntegerField(min_value=1, required=False)
+    itemIId = serializers.IntegerField(min_value=1, required=False)
+
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, "copy") else dict(data)
+        if not data.get("itemId") and data.get("itemIId"):
+            data["itemId"] = data.get("itemIId")
+        if data.get("itemId") in ("", []):
+            data["itemId"] = None
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        item_id = attrs.get("itemId") or attrs.pop("itemIId", None)
+        if not item_id:
+            raise serializers.ValidationError({"itemId": "itemId不能为空"})
+        attrs["itemId"] = item_id
+        attrs.pop("itemIId", None)
+        return attrs
+
+
 class ApsArchiveItemBatchDeleteSerializer(serializers.Serializer):
     archiveId = serializers.IntegerField(min_value=1)
     batchMode = serializers.BooleanField()

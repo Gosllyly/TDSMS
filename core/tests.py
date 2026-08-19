@@ -340,21 +340,46 @@ class ApiIntegrationTests(APITestCase):
         }
         created = self.client.post("/tdsms/aps/itemCreate", create_payload, format="json")
         self.assertEqual(created.status_code, 200, created.data)
-        self.assertEqual(created.data["data"]["productName"], "接口测试品种")
-        self.assertEqual(created.data["data"]["centralizedProcurement"], 1)
+        self.assertEqual(created.data["message"], "APS明细新增成功")
+        self.assertEqual(created.data["data"], {})
+        created_item = archive.items.filter(productName="接口测试品种", packageSpecification="10mg×10片", isDeleted=0).get()
+        self.assertEqual(created_item.centralizedProcurement, 1)
 
         second = dict(create_payload)
         second["packageSpecification"] = "20mg×10片"
         created_second = self.client.post("/tdsms/aps/itemCreate", second, format="json")
         self.assertEqual(created_second.status_code, 200, created_second.data)
+        self.assertEqual(created_second.data["message"], "APS明细新增成功")
+
+        failed_create = self.client.post("/tdsms/aps/itemCreate", {"archiveId": archive.archiveId}, format="json")
+        self.assertEqual(failed_create.status_code, 400)
+        self.assertEqual(failed_create.data["message"], "APS明细新增失败")
+        self.assertEqual(failed_create.data["data"], {})
+
+        update_payload = dict(create_payload)
+        update_payload["itemId"] = created_item.itemId
+        update_payload["productName"] = "接口测试品种-已改"
+        updated = self.client.post("/tdsms/aps/itemUpdate", update_payload, format="json")
+        self.assertEqual(updated.status_code, 200, updated.data)
+        self.assertEqual(updated.data["message"], "APS明细修改成功")
+        self.assertEqual(updated.data["data"], {})
+        self.assertEqual(
+            archive.items.get(itemId=created_item.itemId).productName,
+            "接口测试品种-已改",
+        )
+
+        failed = self.client.post("/tdsms/aps/itemUpdate", create_payload, format="json")
+        self.assertEqual(failed.status_code, 400)
+        self.assertEqual(failed.data["message"], "APS明细修改失败")
+        self.assertEqual(failed.data["data"], {})
 
         single_deleted = self.client.post("/tdsms/aps/itemDelete", {
             "batchMode": False,
             "archiveId": archive.archiveId,
-            "itemId": created.data["data"]["itemId"],
+            "itemId": created_item.itemId,
         }, format="json")
         self.assertEqual(single_deleted.status_code, 200, single_deleted.data)
-        self.assertEqual(single_deleted.data["data"]["itemId"], created.data["data"]["itemId"])
+        self.assertEqual(single_deleted.data["data"]["itemId"], created_item.itemId)
 
         deleted = self.client.post("/tdsms/aps/itemDelete", {
             "batchMode": True,

@@ -4,10 +4,15 @@ import re
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
+from rest_framework import status
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.views import APIView
 
-from api.serializers import ApsArchiveItemBatchDeleteSerializer, ApsArchiveItemCreateSerializer
+from api.serializers import (
+    ApsArchiveItemBatchDeleteSerializer,
+    ApsArchiveItemCreateSerializer,
+    ApsArchiveItemUpdateSerializer,
+)
 from api.utils import ApiResponse, attachment_file_response, get_request_params
 from api.views.common import format_datetime, json_value
 from core.models import ApsArchive, ApsArchiveItem
@@ -93,19 +98,49 @@ class ApsDeleteView(APIView):
 class ApsItemCreateView(APIView):
     def post(self, request):
         serializer = ApsArchiveItemCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            return ApiResponse({}, status=status.HTTP_400_BAD_REQUEST, message="APS明细新增失败")
         data = dict(serializer.validated_data)
         archive_id = data.pop("archiveId")
         archive = ApsArchive.objects.filter(
             archiveId=archive_id, createdBy=request.user, isDeleted=0
         ).first()
         if not archive:
-            raise NotFound("APS方案不存在")
+            return ApiResponse({}, status=status.HTTP_400_BAD_REQUEST, message="APS明细新增失败")
+        try:
+            with transaction.atomic():
+                ApsArchiveItem.objects.create(archive=archive, **data)
+                archive.save(update_fields=["updateTime"])
+        except Exception:
+            return ApiResponse({}, status=status.HTTP_400_BAD_REQUEST, message="APS明细新增失败")
+        return ApiResponse({}, message="APS明细新增成功")
 
-        with transaction.atomic():
-            item = ApsArchiveItem.objects.create(archive=archive, **data)
-            archive.save(update_fields=["updateTime"])
-        return ApiResponse(item_data(item), message="APS明细新增成功")
+
+class ApsItemUpdateView(APIView):
+    def post(self, request):
+        serializer = ApsArchiveItemUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return ApiResponse({}, status=status.HTTP_400_BAD_REQUEST, message="APS明细修改失败")
+        data = dict(serializer.validated_data)
+        archive_id = data.pop("archiveId")
+        item_id = data.pop("itemId")
+        archive = ApsArchive.objects.filter(
+            archiveId=archive_id, createdBy=request.user, isDeleted=0
+        ).first()
+        item = ApsArchiveItem.objects.filter(
+            archive=archive, itemId=item_id, isDeleted=0
+        ).first() if archive else None
+        if not archive or not item:
+            return ApiResponse({}, status=status.HTTP_400_BAD_REQUEST, message="APS明细修改失败")
+        try:
+            with transaction.atomic():
+                for field, value in data.items():
+                    setattr(item, field, value)
+                item.save()
+                archive.save(update_fields=["updateTime"])
+        except Exception:
+            return ApiResponse({}, status=status.HTTP_400_BAD_REQUEST, message="APS明细修改失败")
+        return ApiResponse({}, message="APS明细修改成功")
 
 
 class ApsItemDeleteView(APIView):
