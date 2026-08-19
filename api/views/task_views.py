@@ -136,12 +136,12 @@ class TaskDetailView(APIView):
         task = TaskImportRecord.objects.filter(taskId=task_id, createdBy=request.user, isDeleted=0).first()
         if not task:
             raise NotFound("任务记录不存在")
-        queryset = UploadFileItem.objects.filter(file=task.file, isDeleted=0).order_by("itemId")
+        queryset = UploadFileItem.objects.filter(file=task.file, isDeleted=0)
         keyword = (params.get("keyword") or "").strip()
         if keyword:
             queryset = queryset.filter(Q(materialCode__icontains=keyword) | Q(inventoryName__icontains=keyword) | Q(specification__icontains=keyword))
 
-        queryset = apply_plan_item_filters(queryset, params)
+        queryset = apply_plan_item_filters(queryset, params).order_by("departmentName", "itemId")
         total, records, page, page_size = paginate(queryset, params.get("page"), params.get("pageSize"))
         return ApiResponse({"total": total, "page": page, "pageSize": page_size, "records": [plan_item_data(x) for x in records]}, message="查询成功")
 

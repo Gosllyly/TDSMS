@@ -271,6 +271,33 @@ class ApiIntegrationTests(APITestCase):
         self.assertEqual(response.data["data"]["total"], 1)
         self.assertEqual(response.data["data"]["records"][0]["itemId"], first.itemId)
 
+        # 查询串重复传多选条件时必须保留全部值，不能被 QueryDict.dict() 压成最后一项
+        multi_filters = self.client.get(
+            "/tdsms/task/detailQuery",
+            {
+                "taskId": task.taskId,
+                "departmentNames": ["302车间", "303车间"],
+                "monthlyProductionPlans": [100, 200],
+                "inventoryNames": ["阿司匹林片", "维生素C片"],
+                "page": 1,
+                "pageSize": 10,
+            },
+        )
+        self.assertEqual(multi_filters.status_code, 200, multi_filters.data)
+        self.assertEqual(multi_filters.data["data"]["total"], 2)
+        self.assertEqual(
+            {row["departmentName"] for row in multi_filters.data["data"]["records"]},
+            {"302车间", "303车间"},
+        )
+        self.assertEqual(
+            {row["inventoryName"] for row in multi_filters.data["data"]["records"]},
+            {"阿司匹林片", "维生素C片"},
+        )
+        self.assertEqual(
+            {row["monthlyProductionPlan"] for row in multi_filters.data["data"]["records"]},
+            {100.0, 200.0},
+        )
+
         options = self.client.post(
             "/tdsms/task/detailFilterOptions",
             {

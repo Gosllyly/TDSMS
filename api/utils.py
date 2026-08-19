@@ -99,7 +99,16 @@ def ApiResponse(
 
 def get_request_params(request):
     data = {}
-    data.update(request.query_params.dict())
-    if isinstance(request.data, dict):
+    # QueryDict.dict() 会把同名多值参数压成最后一个，导致 departmentNames 等多选只剩一项
+    for key in request.query_params.keys():
+        values = request.query_params.getlist(key)
+        data[key] = values if len(values) > 1 else values[0]
+    if not isinstance(request.data, dict) or not request.data:
+        return data
+    if hasattr(request.data, "getlist"):
+        for key in request.data.keys():
+            values = request.data.getlist(key)
+            data[key] = values if len(values) > 1 else values[0]
+    else:
         data.update(request.data)
     return data
