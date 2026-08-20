@@ -2,7 +2,7 @@ from django.urls import path
 
 from api.views.aps_views import (
     ApsCreateView, ApsDeleteView, ApsExportView, ApsInfoView, ApsItemCreateView, ApsItemDeleteView,
-    ApsItemUpdateView, ApsListView, ApsTemplateView,
+    ApsItemUpdateView, ApsListView, ApsTemplateView, ApsUpdateNameView,
 )
 from api.views.auth_views import (
     AdminCreateView, AdminExpireUpdateView, AdminQueryView, AdminStatusUpdateView, LoginView, LogoutView,
@@ -22,6 +22,7 @@ urlpatterns = [
     path("aps/listQuery", ApsListView.as_view()),
     path("aps/infoQuery", ApsInfoView.as_view()),
     path("aps/create", ApsCreateView.as_view()),
+    path("aps/updateName", ApsUpdateNameView.as_view()),
     path("aps/delete", ApsDeleteView.as_view()),
     path("aps/itemCreate", ApsItemCreateView.as_view()),
     path("aps/itemUpdate", ApsItemUpdateView.as_view()),

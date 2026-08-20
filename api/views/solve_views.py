@@ -108,7 +108,12 @@ class SolveMatchCheckView(APIView):
         ).select_related("file", "apsArchive").first()
         if not task:
             raise NotFound("任务记录不存在或尚未导入成功")
-        result = match_check_data(task, data["page"], data["pageSize"])
+        department = data["departmentNames"]
+        if not task.file.items.filter(departmentName=department, isDeleted=0).exists():
+            raise ValidationError("所选部门在当前任务计划中不存在")
+        result = match_check_data(
+            task, data["page"], data["pageSize"], department=department,
+        )
         message = (
             "计划数据与APS档案匹配通过"
             if result["status"]

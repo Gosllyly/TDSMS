@@ -107,8 +107,10 @@ def compare_task_plan_with_aps(task, department=None, require_positive_plan=True
     return result
 
 
-def match_check_data(task, page=1, page_size=10):
-    result = compare_task_plan_with_aps(task, require_positive_plan=False)
+def match_check_data(task, page=1, page_size=10, department=None):
+    result = compare_task_plan_with_aps(
+        task, department=department, require_positive_plan=False,
+    )
     missing_data = []
     seen = set()
     for record in result["unmatchedRecords"]:

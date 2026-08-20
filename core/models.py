@@ -27,6 +27,7 @@ class SysUser(models.Model):
 class ApsArchive(models.Model):
     archiveId = models.BigAutoField(primary_key=True)
     archiveName = models.CharField(max_length=100)
+    remark = models.CharField(max_length=500, null=True, blank=True)
     createdBy = models.ForeignKey(SysUser, db_column="createdBy", on_delete=models.PROTECT, related_name="apsArchives")
     createTime = models.DateTimeField(auto_now_add=True)
     updateTime = models.DateTimeField(auto_now=True)

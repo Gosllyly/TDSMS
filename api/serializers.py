@@ -28,10 +28,54 @@ class HistoryImportSerializer(serializers.Serializer):
     taskId = serializers.IntegerField(min_value=1)
 
 
+class ApsUpdateNameSerializer(serializers.Serializer):
+    archiveId = serializers.IntegerField(min_value=1)
+    archiveName = serializers.CharField(max_length=100)
+    remark = serializers.CharField(max_length=500, required=False, allow_blank=True, allow_null=True)
+
+    def validate_archiveName(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("archiveName不能为空")
+        return value
+
+    def validate_remark(self, value):
+        if value in ("", None):
+            return None
+        return value.strip() or None
+
+
+def first_serializer_error(errors, fallback="参数校验失败"):
+    if isinstance(errors, dict):
+        for value in errors.values():
+            message = first_serializer_error(value, "")
+            if message:
+                return message
+        return fallback
+    if isinstance(errors, list):
+        for value in errors:
+            message = first_serializer_error(value, "")
+            if message:
+                return message
+        return fallback
+    if errors in (None, ""):
+        return fallback
+    return str(errors)
+
+
 class ApsArchiveItemCreateSerializer(serializers.Serializer):
     archiveId = serializers.IntegerField(min_value=1)
-    productName = serializers.CharField(max_length=100)
-    packageSpecification = serializers.CharField(max_length=255)
+    productName = serializers.CharField(
+        max_length=100,
+        error_messages={
+            "required": "productName不能为空",
+            "blank": "productName不能为空",
+            "null": "productName不能为空",
+        },
+    )
+    packageSpecification = serializers.CharField(
+        max_length=255, required=False, allow_blank=True, allow_null=True,
+    )
     mixingLine = serializers.CharField(max_length=100, required=False, allow_blank=True, allow_null=True)
     mixingBatchQuantity = serializers.DecimalField(max_digits=14, decimal_places=4, min_value=0, required=False, allow_null=True)
     mixingShiftOutput = serializers.DecimalField(max_digits=14, decimal_places=4, min_value=0, required=False, allow_null=True)
@@ -53,13 +97,39 @@ class ApsArchiveItemCreateSerializer(serializers.Serializer):
     centralizedProcurement = serializers.ChoiceField(choices=[0, 1], required=False, allow_null=True)
     annualSales = serializers.DecimalField(max_digits=18, decimal_places=4, min_value=0, required=False, allow_null=True)
 
+    _empty_as_null_fields = (
+        "mixingLine", "tabletPress", "coatingMachine", "dividingEquipment", "packagingEquipment",
+        "mixingBatchQuantity", "mixingShiftOutput", "mixingWorkerCount",
+        "tabletingShiftOutput", "tabletingWorkerCount",
+        "coatingShiftOutput", "coatingWorkerCount",
+        "dividingShiftOutput", "dividingWorkerCount",
+        "packagingShiftOutput", "manualPackagingOutput", "packagingWorkerCount",
+        "productionCycleDays", "centralizedProcurement", "annualSales",
+        "packageSpecification",
+    )
+
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, "copy") else dict(data)
+        for field in self._empty_as_null_fields:
+            if field in data and data[field] in ("", []):
+                data[field] = None
+        return super().to_internal_value(data)
+
+    def validate_productName(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("productName不能为空")
+        return value
+
     def validate(self, attrs):
-        nullable_text_fields = (
+        for field in (
             "mixingLine", "tabletPress", "coatingMachine", "dividingEquipment", "packagingEquipment",
-        )
-        for field in nullable_text_fields:
+        ):
             if attrs.get(field) == "":
                 attrs[field] = None
+        # 库表 packageSpecification 不允许 NULL，空值落库为空串
+        if "packageSpecification" in attrs or self.__class__ is ApsArchiveItemCreateSerializer:
+            attrs["packageSpecification"] = attrs.get("packageSpecification") or ""
         return attrs
 
 
@@ -151,10 +221,14 @@ class SolveStartSerializer(serializers.Serializer):
 class SolveMatchCheckSerializer(serializers.Serializer):
     taskId = serializers.IntegerField(min_value=1, required=False)
     importId = serializers.IntegerField(min_value=1, required=False)
+    departmentNames = serializers.CharField(max_length=100)
     page = serializers.IntegerField(min_value=1, required=False, default=1)
     pageSize = serializers.IntegerField(min_value=1, max_value=200, required=False, default=10)
 
     def validate(self, attrs):
         if not (attrs.get("taskId") or attrs.get("importId")):
             raise serializers.ValidationError("taskId不能为空")
+        attrs["departmentNames"] = attrs["departmentNames"].strip()
+        if not attrs["departmentNames"]:
+            raise serializers.ValidationError({"departmentNames": "departmentNames不能为空"})
         return attrs
