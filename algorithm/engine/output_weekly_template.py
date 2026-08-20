@@ -311,6 +311,30 @@ def _week_no_sunday_based(week_start):
     return int(week_start.strftime("%U")) + 1
 
 
+def _earliest_slot_index(slots):
+    """返回本周行数据中最早有产量的班次下标，用于按时间正序排序。"""
+    for idx, qty in enumerate(slots):
+        if qty > 1e-9:
+            return idx
+    return len(slots)
+
+
+def _sort_block_rows_by_time(block_rows):
+    """按最早排产班次正序；同班次再按设备、品种稳定排序。"""
+    return sorted(
+        block_rows,
+        key=lambda item: (_earliest_slot_index(item[2]), str(item[0]), str(item[1])),
+    )
+
+
+def _write_stage_section_title(ws, row, stage):
+    title = STAGE_CONFIG[stage]["title"]
+    cell = ws.cell(row, 1, title)
+    cell.font = Font(bold=True, size=14, color="003366")
+    ws.row_dimensions[row].height = 28
+    return row + 2
+
+
 def _write_block(ws, row, week_start, stage, block_rows, metadata, department="210车间"):
     cyan = PatternFill("solid", fgColor="00FFFF")
     yellow = PatternFill("solid", fgColor="FFFF00")
@@ -418,14 +442,23 @@ def generate_template_schedule_board(
 
     all_weeks = sorted({key[0] for key in rows})
     row = 1
-    for week_start in all_weeks:
-        for stage in (1, 2, 3, 4):
+    # 四大板块：配料 → 压片 → 包衣 → 铝塑包装；板块内按周、按时间正序
+    for stage in (1, 2, 3, 4):
+        stage_weeks = []
+        for week_start in all_weeks:
             block_rows = []
             for (wk, st, device, item), slots in rows.items():
                 if wk == week_start and st == stage and any(q > 1e-9 for q in slots):
                     block_rows.append((device, item, slots))
-            block_rows.sort(key=lambda x: (str(x[0]), str(x[1])))
-            row = _write_block(ws, row, week_start, stage, block_rows, metadata, department=department)
+            if block_rows:
+                stage_weeks.append((week_start, _sort_block_rows_by_time(block_rows)))
+        if not stage_weeks:
+            continue
+        row = _write_stage_section_title(ws, row, stage)
+        for week_start, block_rows in stage_weeks:
+            row = _write_block(
+                ws, row, week_start, stage, block_rows, metadata, department=department,
+            )
 
     for rows_cells in ws.iter_rows():
         for cell in rows_cells:

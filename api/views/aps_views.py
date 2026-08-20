@@ -20,7 +20,12 @@ from api.utils import ApiResponse, attachment_file_response, get_request_params
 from api.views.common import format_datetime, json_value
 from core.models import ApsArchive, ApsArchiveItem
 from services.aps_export_service import export_aps_archive
-from services.excel_service import ExcelValidationError, parse_aps_file
+from services.excel_service import (
+    APS_TEMPLATE_FILENAME,
+    ExcelValidationError,
+    parse_aps_file,
+    resolve_media_template,
+)
 
 
 def item_data(item):
@@ -39,8 +44,8 @@ def item_data(item):
 
 class ApsTemplateView(APIView):
     def get(self, request):
-        path = Path(settings.MEDIA_ROOT) / "templates" / "APS排产信息模板.xlsx"
-        return attachment_file_response(open(path, "rb"), path.name)
+        path = resolve_media_template(APS_TEMPLATE_FILENAME, ascii_prefix="APS")
+        return attachment_file_response(open(path, "rb"), APS_TEMPLATE_FILENAME)
 
 
 class ApsListView(APIView):

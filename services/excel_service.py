@@ -5,11 +5,60 @@ from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
 
+from django.conf import settings
 from openpyxl import load_workbook
 
 
 class ExcelValidationError(ValueError):
     pass
+
+
+APS_TEMPLATE_FILENAME = "APS排产信息模板.xlsx"
+PLAN_TEMPLATE_FILENAME = "药业车间分解编排计划模板.xlsx"
+
+
+def resolve_media_template(preferred_name: str, *, ascii_prefix: str | None = None) -> Path:
+    """解析 media/templates 下的模板文件。
+
+    源码使用 UTF-8 中文文件名；部分 Windows 环境中磁盘文件名编码不一致，
+    导致精确路径找不到。优先精确匹配，失败后按 ASCII 前缀或目录内唯一候选回退。
+    """
+    templates_dir = Path(settings.MEDIA_ROOT) / "templates"
+    preferred = templates_dir / preferred_name
+    if preferred.is_file():
+        return preferred
+
+    if not templates_dir.is_dir():
+        raise FileNotFoundError(f"模板目录不存在: {templates_dir}")
+
+    candidates = [
+        path for path in templates_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".xlsx", ".xls"}
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"模板目录为空: {templates_dir}")
+
+    if ascii_prefix:
+        matched = [path for path in candidates if path.name.startswith(ascii_prefix)]
+        if len(matched) == 1:
+            return matched[0]
+        if matched:
+            # 同前缀多个时，选体积最大的（正式模板通常更大）
+            return max(matched, key=lambda path: path.stat().st_size)
+
+    # 计划模板等无文文件名：回退为目录中非 APS 的唯一 xlsx
+    if preferred_name == PLAN_TEMPLATE_FILENAME or (
+        ascii_prefix is None and not preferred_name.startswith("APS")
+    ):
+        non_aps = [path for path in candidates if not path.name.startswith("APS")]
+        if len(non_aps) == 1:
+            return non_aps[0]
+        if non_aps:
+            return max(non_aps, key=lambda path: path.stat().st_size)
+
+    raise FileNotFoundError(
+        f"未找到模板文件: {preferred_name}（目录: {templates_dir}）"
+    )
 
 
 APS_HEADERS = [

@@ -1,9 +1,9 @@
 from copy import copy
 from io import BytesIO
-from pathlib import Path
 
-from django.conf import settings
 from openpyxl import load_workbook
+
+from services.excel_service import APS_TEMPLATE_FILENAME, resolve_media_template
 
 
 APS_EXPORT_FIELDS = (
@@ -43,7 +43,7 @@ def _excel_value(field, value):
 
 
 def export_aps_archive(items):
-    template = Path(settings.MEDIA_ROOT) / "templates" / "APS排产信息模板.xlsx"
+    template = resolve_media_template(APS_TEMPLATE_FILENAME, ascii_prefix="APS")
     workbook = load_workbook(template)
     sheet = workbook.worksheets[0]
 

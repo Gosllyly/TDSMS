@@ -11,7 +11,12 @@ from api.serializers import HistoryImportSerializer
 from api.utils import ApiResponse, attachment_file_response, get_request_params
 from api.views.common import format_datetime, json_value, paginate
 from core.models import ApsArchive, TaskImportRecord, UploadFile, UploadFileItem
-from services.excel_service import ExcelValidationError, parse_plan_file
+from services.excel_service import (
+    ExcelValidationError,
+    PLAN_TEMPLATE_FILENAME,
+    parse_plan_file,
+    resolve_media_template,
+)
 
 
 def task_data(task):
@@ -43,27 +48,80 @@ PLAN_FILTER_FIELDS = {
     "inventoryNames": "inventoryName",
 }
 
+PLAN_BLANKABLE_CHAR_FIELDS = {"departmentName", "inventoryName"}
+_NULL_TOKENS = {"null", "none", "undefined"}
+
+
+def _is_blank_filter_value(value):
+    """空字符串表示筛选该字段无值的数据（用于文本筛选项）。"""
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _is_monthly_null_token(value):
+    """兼容前端传 JSON null、字符串 'null'、或 ['null']。"""
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip().lower() in _NULL_TOKENS:
+        return True
+    return False
+
+
+def _blank_field_condition(field_name):
+    if field_name == "monthlyProductionPlan":
+        return Q(**{f"{field_name}__isnull": True})
+    if field_name in PLAN_BLANKABLE_CHAR_FIELDS:
+        return Q(**{field_name: ""}) | Q(**{f"{field_name}__isnull": True})
+    return Q(**{f"{field_name}__isnull": True}) | Q(**{field_name: ""})
+
 
 def apply_plan_item_filters(queryset, params, skip_option=None):
     for option, field_name in PLAN_FILTER_FIELDS.items():
         if option == skip_option:
             continue
-        values = params.get(option) or []
+        if option not in params:
+            continue
+        values = params.get(option)
+
+        # monthlyProductionPlans: null / "null" 表示筛选该字段为空的数据
+        if option == "monthlyProductionPlans" and _is_monthly_null_token(values):
+            queryset = queryset.filter(_blank_field_condition(field_name))
+            continue
+
         if not isinstance(values, (list, tuple)):
-            values = [values]
+            values = [values] if values is not None else []
         if not values:
             continue
-        try:
-            queryset = queryset.filter(**{f"{field_name}__in": values})
-        except (TypeError, ValueError) as exc:
-            raise ValidationError("筛选条件格式不正确") from exc
+
+        blank_requested = False
+        concrete_values = []
+        for value in values:
+            if option == "monthlyProductionPlans":
+                if _is_monthly_null_token(value) or _is_blank_filter_value(value):
+                    blank_requested = True
+                    continue
+                concrete_values.append(value)
+            elif _is_blank_filter_value(value):
+                blank_requested = True
+            else:
+                concrete_values.append(value)
+
+        condition = Q()
+        if concrete_values:
+            try:
+                condition |= Q(**{f"{field_name}__in": concrete_values})
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("筛选条件格式不正确") from exc
+        if blank_requested:
+            condition |= _blank_field_condition(field_name)
+        if condition:
+            queryset = queryset.filter(condition)
     return queryset
 
 
 class TaskTemplateView(APIView):
     def get(self, request):
-        path = Path(settings.MEDIA_ROOT) / "templates" / "药业车间分解编排计划模板.xlsx"
-        return attachment_file_response(open(path, "rb"), path.name)
+        path = resolve_media_template(PLAN_TEMPLATE_FILENAME)
+        return attachment_file_response(open(path, "rb"), PLAN_TEMPLATE_FILENAME)
 
 
 class TaskHistoryView(APIView):
@@ -167,8 +225,15 @@ class TaskDetailFilterOptionsView(APIView):
         field_name = PLAN_FILTER_FIELDS[option]
         queryset = UploadFileItem.objects.filter(file=task.file, isDeleted=0)
         queryset = apply_plan_item_filters(queryset, params, skip_option=option)
-        queryset = queryset.exclude(**{f"{field_name}__isnull": True})
-        if field_name in {"departmentName", "inventoryName"}:
-            queryset = queryset.exclude(**{field_name: ""})
-        values = queryset.order_by(field_name).values_list(field_name, flat=True).distinct()
-        return ApiResponse([json_value(value) for value in values], message="查询成功")
+
+        blank_condition = _blank_field_condition(field_name)
+        has_blank = queryset.filter(blank_condition).exists()
+
+        valued = queryset.exclude(blank_condition)
+        values = list(valued.order_by(field_name).values_list(field_name, flat=True).distinct())
+        result = [json_value(value) for value in values]
+        if has_blank:
+            # monthlyProductionPlans 用 null，其余文本筛选用 ""
+            blank_token = None if field_name == "monthlyProductionPlan" else ""
+            result.insert(0, blank_token)
+        return ApiResponse(result, message="查询成功")
