@@ -40,7 +40,17 @@ def _is_sunday(day_index, start_date):
     return (start_date + timedelta(days=day_index)).weekday() == 6
 
 
+def _validate_shifts_per_day(shifts_per_day):
+    if isinstance(shifts_per_day, bool) or int(shifts_per_day) != shifts_per_day:
+        raise ValueError("shifts_per_day must be a positive integer")
+    shifts_per_day = int(shifts_per_day)
+    if shifts_per_day <= 0:
+        raise ValueError("shifts_per_day must be a positive integer")
+    return shifts_per_day
+
+
 def working_to_calendar_shift(value, start_date, shifts_per_day=2):
+    shifts_per_day = _validate_shifts_per_day(shifts_per_day)
     if pd.isna(value):
         return value
     remaining = float(value)
@@ -63,12 +73,14 @@ def working_to_calendar_shift(value, start_date, shifts_per_day=2):
         day_index += 1
 
 
-def _map_time_column(df, column, start_date):
+def _map_time_column(df, column, start_date, shifts_per_day):
     if column not in df.columns:
         return
     values = pd.to_numeric(df[column], errors="coerce")
     mask = values.notna()
-    df.loc[mask, column] = values[mask].map(lambda x: round(working_to_calendar_shift(x, start_date), 2))
+    df.loc[mask, column] = values[mask].map(
+        lambda x: round(working_to_calendar_shift(x, start_date, shifts_per_day), 2)
+    )
 
 
 def _update_actual_gap(clear_df):
@@ -135,12 +147,26 @@ def _recompute_cycles(batch_df, pack_df, clear_df, due):
         pack_df.at[idx, "延误班时"] = round(max(0.0, float(row["包装完工(班时)"]) - float(due.get(item, 0.0))), 2)
 
 
-def postprocess_detail_for_sundays(input_file, output_file, demo_file, aps_file, start_date, department="210车间"):
+def postprocess_detail_for_sundays(
+    input_file,
+    output_file,
+    demo_file,
+    aps_file,
+    start_date,
+    department="210车间",
+    shifts_per_day=2,
+):
+    shifts_per_day = _validate_shifts_per_day(shifts_per_day)
     (
         _I, _J1, _J2, _J3, _J4, _B, _p1, _p2, _p3, _p4, _p5, due, _T, _w,
         _stage_staff_limits, _clear_time_matrices, _machine_available_time,
         _release_time, _max_continuous_run,
-    ) = build_schedule_inputs(demo_file, aps_file, department=department)
+    ) = build_schedule_inputs(
+        demo_file,
+        aps_file,
+        department=department,
+        shifts_per_day=shifts_per_day,
+    )
 
     batch_df = pd.read_excel(input_file, sheet_name=BATCH_SHEET)
     pack_df = pd.read_excel(input_file, sheet_name=PACK_SHEET)
@@ -148,7 +174,7 @@ def postprocess_detail_for_sundays(input_file, output_file, demo_file, aps_file,
 
     for sheet_name, df in [(BATCH_SHEET, batch_df), (PACK_SHEET, pack_df), (CLEAR_SHEET, clear_df)]:
         for column in TIME_COLUMNS[sheet_name]:
-            _map_time_column(df, column, start_date)
+            _map_time_column(df, column, start_date, shifts_per_day)
 
     _update_actual_gap(clear_df)
     _recompute_cycles(batch_df, pack_df, clear_df, due)
@@ -156,7 +182,10 @@ def postprocess_detail_for_sundays(input_file, output_file, demo_file, aps_file,
     report = pd.DataFrame(
         [
             {
-                "说明": "所有班时已从连续工作班时映射到自然日历班时，周日两班为空档，后续方案整体顺延。",
+                "说明": (
+                    "所有班时已从连续工作班时映射到自然日历班时，"
+                    f"周日{shifts_per_day}班为空档，后续方案整体顺延。"
+                ),
                 "起始日期": start_date.strftime("%Y-%m-%d"),
                 "周日": "不加工",
             }
@@ -177,10 +206,18 @@ def main():
     parser.add_argument("--demo", default=DEFAULT_DEMO, help="Demo/monthly plan Excel.")
     parser.add_argument("--aps", default=DEFAULT_APS, help="APS capacity Excel.")
     parser.add_argument("--start-date", default=DEFAULT_START_DATE, help="Schedule start date, YYYY-MM-DD.")
+    parser.add_argument("--shifts-per-day", type=int, default=2, help="Shifts per natural day.")
     args = parser.parse_args()
 
     start_date = datetime.strptime(args.start_date, "%Y-%m-%d")
-    postprocess_detail_for_sundays(args.input, args.output, args.demo, args.aps, start_date)
+    postprocess_detail_for_sundays(
+        args.input,
+        args.output,
+        args.demo,
+        args.aps,
+        start_date,
+        shifts_per_day=args.shifts_per_day,
+    )
     print(f"已输出周日休息明细: {args.output}")
 
 

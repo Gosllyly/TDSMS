@@ -5,7 +5,7 @@ import os
 import signal
 import sys
 import time
-from contextlib import redirect_stderr, redirect_stdout
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -57,11 +57,17 @@ def build_solver_options(
     solverTimeLimitMinutes,
     department="210车间",
 ):
-    shifts_per_day = float(shiftCount)
+    natural_days = float(naturalDays)
+    if natural_days <= 0:
+        raise ValueError("naturalDays must be greater than zero")
+    shifts_per_day = float(shiftCount) / natural_days
+    if shifts_per_day <= 0 or abs(shifts_per_day - round(shifts_per_day)) > 1e-9:
+        raise ValueError("shiftCount / naturalDays must be a positive integer")
+    shifts_per_day = int(round(shifts_per_day))
     stage1_sec, stage2_sec, cp_sec = allocate_solver_seconds(solverTimeLimitMinutes)
     return {
         "schedule_start_date": parse_schedule_month(scheduleMonth),
-        "natural_days": naturalDays,
+        "natural_days": natural_days,
         "shifts_per_day": shifts_per_day,
         "continuous_run_shifts": float(continuousRunLimitDays) * shifts_per_day,
         "major_cleaning_shifts": float(majorCleaningDays) * shifts_per_day,
@@ -83,7 +89,6 @@ def build_solver_options(
 
 
 def run_solver(
-    taskId,
     planFile,
     apsFile,
     scheduleMonth,
@@ -99,12 +104,14 @@ def run_solver(
     packaging,
     solverTimeLimitMinutes,
     department="210车间",
+    taskId=None,
     task_root=None,
     run_inline=False,
 ):
     task_root = _task_root(task_root)
     task_root.mkdir(parents=True, exist_ok=True)
-    task_id = str(taskId)
+    # Django 适配层传入 solveTaskId，保证运行目录与业务任务 ID 一致。
+    task_id = str(taskId) if taskId is not None else _new_task_id()
     task_dir = task_root / task_id
     task_dir.mkdir(parents=True, exist_ok=False)
 
@@ -143,7 +150,7 @@ def run_solver(
     }
     _write_json(task_dir / "params.json", params)
     _write_status(task_dir, _initial_status(task_id, task_dir, params))
-    _append_log(task_dir, f"任务创建: {task_id}")
+    (task_dir / "solver.log").touch()
 
     worker_args = (task_id, str(task_dir), params)
     if run_inline:
@@ -175,7 +182,6 @@ def query_solver_log(taskId, offset=0, limit=None, task_root=None):
 def stop_solver(taskId, task_root=None):
     task_dir = _task_dir(taskId, task_root)
     (task_dir / STOP_REQUEST_FILE).write_text(_now(), encoding="utf-8")
-    _append_log(task_dir, "任务已请求停止")
     visual_file = Path(_result_files(task_dir)["visualBoard"])
     if not visual_file.is_file():
         return _force_stop_solver(taskId, task_root=task_root)
@@ -203,8 +209,8 @@ def export_solver_result(taskId, task_root=None):
 
 def _solver_worker(task_id, task_dir_text, params):
     task_dir = Path(task_dir_text)
-    log_path = task_dir / "solver.log"
     _update_status(task_dir, status=STATUS_RUNNING, pid=os.getpid(), startedAt=_now())
+    # 限时从算法开始计算起算，严格遵循前端传入的 solverTimeLimitMinutes。
     deadline = time.monotonic() + float(params["solverTimeLimitMinutes"]) * 60
 
     def user_stop_checker():
@@ -214,82 +220,79 @@ def _solver_worker(task_id, task_dir_text, params):
         return user_stop_checker() or time.monotonic() >= deadline
 
     try:
-        with log_path.open("a", encoding="utf-8") as log_file:
-            with redirect_stdout(log_file), redirect_stderr(log_file):
-                _append_log(task_dir, "求解子进程启动")
+        def emit(message):
+            _append_log(task_dir, str(message))
+            _update_status(task_dir, progressMessage=str(message))
 
-                def emit(message):
-                    _append_log(task_dir, str(message))
-                    _update_status(task_dir, progressMessage=str(message))
+        def on_result_exported(kind):
+            visual_file = Path(_result_files(task_dir)["visualBoard"])
+            if not visual_file.is_file():
+                return
+            _update_status(
+                task_dir,
+                resultReady=True,
+                resultKind=kind,
+                resultFiles=_result_files(task_dir),
+            )
 
-                def on_result_exported(kind):
-                    visual_file = Path(_result_files(task_dir)["visualBoard"])
-                    if not visual_file.is_file():
-                        return
-                    _update_status(
-                        task_dir,
-                        resultReady=True,
-                        resultKind=kind,
-                        resultFiles=_result_files(task_dir),
-                    )
-
-                result = _run_pipeline_for_task(
-                    task_dir, params, emit,
-                    stop_checker=stop_checker,
-                    user_stop_checker=user_stop_checker,
-                    deadline_monotonic=deadline,
-                    on_result_exported=on_result_exported,
-                )
-                status = _read_json(task_dir / "status.json")
-                if user_stop_checker():
-                    visual_file = Path(_result_files(task_dir)["visualBoard"])
-                    result_ready = visual_file.exists()
-                    _update_status(
-                        task_dir,
-                        status=STATUS_STOPPED,
-                        finishedAt=_now(),
-                        stopRequested=True,
-                        stopMode="graceful",
-                        resultReady=result_ready,
-                        resultKind="partial" if result_ready else None,
-                        error=None if result_ready else "未生成可行解",
-                        result=result,
-                        resultFiles=_result_files(task_dir) if result_ready else {},
-                        progressMessage=(
-                            "已停止搜索并输出当前最佳方案"
-                            if result_ready else
-                            "已停止搜索，未生成可行解"
-                        ),
-                    )
-                    _append_log(
-                        task_dir,
-                        "已停止搜索并输出当前最佳方案" if result_ready else "已停止搜索，未生成可行解",
-                    )
-                elif status.get("status") != STATUS_STOPPED:
-                    visual_ready = Path(_result_files(task_dir)["visualBoard"]).exists()
-                    _update_status(
-                        task_dir,
-                        status=STATUS_SUCCESS,
-                        finishedAt=_now(),
-                        error=None,
-                        stopRequested=False,
-                        resultReady=visual_ready,
-                        resultKind="final" if visual_ready else None,
-                        result=result,
-                        resultFiles=_result_files(task_dir) if visual_ready else {},
-                    )
-                    _append_log(task_dir, "求解任务完成")
+        result = _run_pipeline_for_task(
+            task_dir,
+            params,
+            emit,
+            stop_checker=stop_checker,
+            user_stop_checker=user_stop_checker,
+            deadline_monotonic=deadline,
+            on_result_exported=on_result_exported,
+        )
+        status = _read_json(task_dir / "status.json")
+        if user_stop_checker():
+            visual_file = Path(_result_files(task_dir)["visualBoard"])
+            result_ready = visual_file.exists()
+            _update_status(
+                task_dir,
+                status=STATUS_STOPPED,
+                finishedAt=_now(),
+                stopRequested=True,
+                stopMode="graceful",
+                resultReady=result_ready,
+                resultKind="partial" if result_ready else None,
+                error=None if result_ready else "未生成可行解",
+                result=result,
+                resultFiles=_result_files(task_dir) if result_ready else {},
+                progressMessage=(
+                    "已停止搜索并输出当前最佳方案"
+                    if result_ready else
+                    "已停止搜索，未生成可行解"
+                ),
+            )
+        elif status.get("status") != STATUS_STOPPED:
+            visual_ready = Path(_result_files(task_dir)["visualBoard"]).exists()
+            _update_status(
+                task_dir,
+                status=STATUS_SUCCESS,
+                finishedAt=_now(),
+                error=None,
+                stopRequested=False,
+                resultReady=visual_ready,
+                resultKind="final" if visual_ready else None,
+                result=result,
+                resultFiles=_result_files(task_dir) if visual_ready else {},
+            )
     except BaseException as exc:
         status = _read_json(task_dir / "status.json")
         if status.get("status") != STATUS_STOPPED:
-            _append_log(task_dir, f"求解任务失败: {exc}")
             _update_status(task_dir, status=STATUS_FAILED, finishedAt=_now(), error=str(exc))
         raise
 
 
 def _run_pipeline_for_task(
-    task_dir, params, emit, stop_checker=None, user_stop_checker=None,
-    deadline_monotonic=None, on_result_exported=None,
+    task_dir,
+    params,
+    emit,
+    stop_checker=None,
+    user_stop_checker=None,
+    deadline_monotonic=None,
+    on_result_exported=None,
 ):
     options = params["options"]
     stage_seconds = options["stage_seconds"]
@@ -313,6 +316,7 @@ def _run_pipeline_for_task(
         max_continuous_run_override=options["continuous_run_shifts"],
         major_cleaning_time_override=options["major_cleaning_shifts"],
         minor_cleaning_time_override=options["minor_cleaning_shifts"],
+        shifts_per_day=options["shifts_per_day"],
         periodic_cleaning_time=options["periodic_cleaning_shifts"],
         stop_checker=stop_checker,
         user_stop_checker=user_stop_checker,
@@ -361,6 +365,10 @@ def _task_dir(task_id, task_root=None):
     if not task_dir.exists():
         raise FileNotFoundError(f"任务不存在: {task_id}")
     return task_dir
+
+
+def _new_task_id():
+    return f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
 
 
 def _now():
@@ -417,7 +425,6 @@ def _force_stop_solver(taskId, task_root=None):
             os.kill(int(status["pid"]), signal.SIGTERM)
         except (OSError, ProcessLookupError):
             pass
-    _append_log(task_dir, "任务已强制停止")
     _update_status(task_dir, status=STATUS_STOPPED, finishedAt=_now(), stopRequested=True, stopMode="force")
     return {"taskId": taskId, "status": STATUS_STOPPED}
 

@@ -162,17 +162,22 @@ class SolveStopView(APIView):
         solve, _ = sync_solve_task(solve, cleanup=False)
         if solve.solveStatus not in [0, 1]:
             raise ValidationError("当前求解任务已结束，不允许停止")
-        stop_solver(solve.solveTaskId)
+        stop_result = stop_solver(solve.solveTaskId)
         solve.refresh_from_db()
+        has_partial = bool(solve.partialResultFilePath and Path(solve.partialResultFilePath).is_file())
+        if stop_result.get("status") == "STOPPED" and not has_partial:
+            message = "求解任务已停止"
+        else:
+            message = "停止请求已接收，系统正在生成当前最优结果"
         return ApiResponse(
             {
                 "solveTaskId": solve.solveTaskId,
                 "solveStatus": solve.solveStatus,
                 "stopRequested": True,
-                "hasPartialResult": bool(solve.partialResultFilePath and Path(solve.partialResultFilePath).is_file()),
+                "hasPartialResult": has_partial,
             },
             status=status.HTTP_202_ACCEPTED,
-            message="停止请求已接收，系统正在生成当前最优结果",
+            message=message,
         )
 
 

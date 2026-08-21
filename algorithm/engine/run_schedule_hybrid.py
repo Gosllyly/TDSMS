@@ -113,6 +113,7 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
     max_continuous_run_override=None,
     major_cleaning_time_override=None,
     minor_cleaning_time_override=None,
+    shifts_per_day=2,
     periodic_cleaning_time=1.0,
     stop_checker=None,
     user_stop_checker=None,
@@ -150,6 +151,7 @@ def _solve_pharmaceutical_schedule_cp_hybrid_impl(
         max_continuous_run_override=max_continuous_run_override,
         major_cleaning_time_override=major_cleaning_time_override,
         minor_cleaning_time_override=minor_cleaning_time_override,
+        shifts_per_day=shifts_per_day,
         department=department,
     )
 
@@ -405,6 +407,7 @@ def solve_pharmaceutical_schedule_cp_hybrid(
     max_continuous_run_override=None,
     major_cleaning_time_override=None,
     minor_cleaning_time_override=None,
+    shifts_per_day=2,
     periodic_cleaning_time=1.0,
     stop_checker=None,
     user_stop_checker=None,
@@ -438,6 +441,7 @@ def solve_pharmaceutical_schedule_cp_hybrid(
             max_continuous_run_override=max_continuous_run_override,
             major_cleaning_time_override=major_cleaning_time_override,
             minor_cleaning_time_override=minor_cleaning_time_override,
+            shifts_per_day=shifts_per_day,
             periodic_cleaning_time=periodic_cleaning_time,
             stop_checker=stop_checker,
             user_stop_checker=user_stop_checker,
@@ -503,6 +507,7 @@ def _export_solution_bundle(snapshot, kind, model_data, export_spec):
         export_spec["aps_file"],
         export_spec["schedule_start_date"],
         export_spec["department"],
+        shifts_per_day=export_spec["shifts_per_day"],
     )
     visual_file = generate_template_schedule_board(
         export_spec["sunday_rest_output_file"],
@@ -511,6 +516,7 @@ def _export_solution_bundle(snapshot, kind, model_data, export_spec):
         export_spec["visual_output_file"],
         export_spec["schedule_start_date"],
         export_spec["department"],
+        shifts_per_day=export_spec["shifts_per_day"],
     )
     callback = export_spec.get("on_result_exported")
     if callback:
@@ -557,6 +563,7 @@ def run_full_schedule_pipeline(
     user_stop_checker=None,
     deadline_monotonic=None,
     department="210车间",
+    shifts_per_day=2,
     on_result_exported=None,
 ):
     schedule_start_date = _coerce_schedule_start_date(schedule_month)
@@ -575,6 +582,7 @@ def run_full_schedule_pipeline(
         "periodic_cleaning_time": periodic_cleaning_time,
         "minor_cleaning_time_override": minor_cleaning_time_override,
         "department": department,
+        "shifts_per_day": shifts_per_day,
         "on_result_exported": on_result_exported,
     }
 
@@ -599,6 +607,7 @@ def run_full_schedule_pipeline(
         max_continuous_run_override=max_continuous_run_override,
         major_cleaning_time_override=major_cleaning_time_override,
         minor_cleaning_time_override=minor_cleaning_time_override,
+        shifts_per_day=shifts_per_day,
         periodic_cleaning_time=periodic_cleaning_time,
         stop_checker=stop_checker,
         user_stop_checker=user_stop_checker,
@@ -633,6 +642,7 @@ def run_full_schedule_pipeline(
             aps_file,
             schedule_start_date,
             department,
+            shifts_per_day=shifts_per_day,
         )
         visual_file = generate_template_schedule_board(
             sunday_rest_output_file,
@@ -641,6 +651,7 @@ def run_full_schedule_pipeline(
             visual_output_file,
             schedule_start_date,
             department,
+            shifts_per_day=shifts_per_day,
         )
         if on_result_exported:
             on_result_exported("final" if not solve_result.get("stopped") else "partial")

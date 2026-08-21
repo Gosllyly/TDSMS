@@ -5,25 +5,6 @@ import re
 
 ddl = 62
 
-MONTHLY_PLAN_COL = "月份生产计划"
-# 与上传校验一致：允许「月份生产计划」「7月份生产计划」「07月份生产计划」
-MONTHLY_PLAN_HEADER_RE = re.compile(r"^(?:0?[1-9]|1[0-2])?月份生产计划$")
-
-
-def _normalize_monthly_plan_column(df):
-    """将带月份前缀的计划列表头统一为「月份生产计划」。"""
-    if MONTHLY_PLAN_COL in df.columns:
-        return df
-    matched = [
-        col for col in df.columns
-        if MONTHLY_PLAN_HEADER_RE.match(str(col).strip())
-    ]
-    if not matched:
-        raise KeyError(
-            "计划表缺少「月份生产计划」列（也接受如「7月份生产计划」「12月份生产计划」）"
-        )
-    return df.rename(columns={matched[0]: MONTHLY_PLAN_COL})
-
 
 # === [修复 1] 补上缺失的 safe_float 函数 ===
 def safe_float(val):
@@ -214,6 +195,7 @@ def build_schedule_inputs(
     major_cleaning_time_override=None,
     minor_cleaning_time_override=None,
     department="210车间",
+    shifts_per_day=2,
 ):
     """
     根据 demo 订单表和 APS 产能表，自动提取并构建排产算法所需的输入参数。
@@ -257,7 +239,7 @@ def build_schedule_inputs(
     # ==========================================
     if not os.path.exists(demo_file):
         raise FileNotFoundError(f"找不到文件：{demo_file}")
-    df_demo = _normalize_monthly_plan_column(pd.read_excel(demo_file))
+    df_demo = pd.read_excel(demo_file)
 
     df_210 = df_demo[df_demo['部门'] == department].copy()
     df_210 = df_210.dropna(subset=['存货名称', '规格'])
@@ -447,7 +429,7 @@ def build_schedule_inputs(
         # --- T 逻辑 (生产周期) ---
         raw_cycle = match_aps['生产周期/天'].iloc[0]
         if pd.notna(raw_cycle) and str(raw_cycle).strip() not in ['-', '——', 'nan', '']:
-            T[key] = float(raw_cycle) * 2
+            T[key] = float(raw_cycle) * float(shifts_per_day)
         else:
             T[key] = 0
 

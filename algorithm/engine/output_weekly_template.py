@@ -1,5 +1,6 @@
 import math
 import re
+import argparse
 from collections import defaultdict
 from copy import copy
 from datetime import datetime, timedelta
@@ -74,10 +75,33 @@ STAGE_CONFIG = {
 
 HEADER = [
     "生产区域", "产品代码", "品名", "规格", "包装规格", "生产类型",
-    "周日1", "周日2", "周一1", "周一2", "周二1", "周二2", "周三1", "周三2",
-    "周四1", "周四2", "周五1", "周五2", "周六1", "周六2",
     "生产计划量", "销售计划量", "计划说明",
 ]
+
+
+DAY_NAMES = ("周日", "周一", "周二", "周三", "周四", "周五", "周六")
+
+
+def _validate_shifts_per_day(shifts_per_day):
+    if isinstance(shifts_per_day, bool) or int(shifts_per_day) != shifts_per_day:
+        raise ValueError("shifts_per_day must be a positive integer")
+    shifts_per_day = int(shifts_per_day)
+    if shifts_per_day <= 0:
+        raise ValueError("shifts_per_day must be a positive integer")
+    return shifts_per_day
+
+
+def _build_header(shifts_per_day):
+    shifts_per_day = _validate_shifts_per_day(shifts_per_day)
+    return (
+        HEADER[:6]
+        + [
+            f"{day}{shift_no}"
+            for day in DAY_NAMES
+            for shift_no in range(1, shifts_per_day + 1)
+        ]
+        + HEADER[-3:]
+    )
 
 
 def _safe_float(value, default=0.0):
@@ -186,31 +210,32 @@ def _week_start_sunday(day):
     return day - timedelta(days=(day.weekday() + 1) % 7)
 
 
-def _shift_bounds(start_date, shift_index):
-    day = start_date + timedelta(days=shift_index // 2)
-    shift_no = (shift_index % 2) + 1
+def _shift_bounds(start_date, shift_index, shifts_per_day=2):
+    shifts_per_day = _validate_shifts_per_day(shifts_per_day)
+    day = start_date + timedelta(days=shift_index // shifts_per_day)
+    shift_no = (shift_index % shifts_per_day) + 1
     return day, shift_no
 
 
-def _is_sunday_shift(start_date, shift_index):
-    day, _shift_no = _shift_bounds(start_date, shift_index)
+def _is_sunday_shift(start_date, shift_index, shifts_per_day=2):
+    day, _shift_no = _shift_bounds(start_date, shift_index, shifts_per_day)
     return day.weekday() == 6
 
 
-def _advance_to_working_time(calendar_time, start_date):
+def _advance_to_working_time(calendar_time, start_date, shifts_per_day=2):
     current = float(calendar_time)
     while True:
         shift_idx = math.floor(current + 1e-9)
-        if not _is_sunday_shift(start_date, shift_idx):
+        if not _is_sunday_shift(start_date, shift_idx, shifts_per_day):
             return current
         current = shift_idx + 1
 
 
-def _add_working_duration(calendar_start, working_duration, start_date):
-    current = _advance_to_working_time(calendar_start, start_date)
+def _add_working_duration(calendar_start, working_duration, start_date, shifts_per_day=2):
+    current = _advance_to_working_time(calendar_start, start_date, shifts_per_day)
     remaining = float(working_duration)
     while remaining > 1e-9:
-        current = _advance_to_working_time(current, start_date)
+        current = _advance_to_working_time(current, start_date, shifts_per_day)
         shift_idx = math.floor(current + 1e-9)
         shift_end = shift_idx + 1
         available = max(0.0, shift_end - current)
@@ -222,8 +247,9 @@ def _add_working_duration(calendar_start, working_duration, start_date):
     return current
 
 
-def _split_task_by_week(start, end, rate, start_date):
-    result = defaultdict(lambda: [0.0] * 14)
+def _split_task_by_week(start, end, rate, start_date, shifts_per_day=2):
+    shifts_per_day = _validate_shifts_per_day(shifts_per_day)
+    result = defaultdict(lambda: [0.0] * (7 * shifts_per_day))
     if end <= start or rate <= 0:
         return result
 
@@ -233,35 +259,49 @@ def _split_task_by_week(start, end, rate, start_date):
         overlap = max(0.0, min(end, shift_idx + 1) - max(start, shift_idx))
         if overlap <= 1e-9:
             continue
-        day, shift_no = _shift_bounds(start_date, shift_idx)
+        day, shift_no = _shift_bounds(start_date, shift_idx, shifts_per_day)
         if day.weekday() == 6:
             continue
         week_start = _week_start_sunday(day)
         day_offset = (day - week_start).days
         if 0 <= day_offset <= 6:
-            slot = day_offset * 2 + (shift_no - 1)
+            slot = day_offset * shifts_per_day + (shift_no - 1)
             result[week_start][slot] += overlap * rate
     return result
 
 
-def _add_quantity(rows, stage, device, item, start, end, rate, start_date):
-    for week_start, slots in _split_task_by_week(start, end, rate, start_date).items():
+def _add_quantity(rows, stage, device, item, start, end, rate, start_date, shifts_per_day=2):
+    for week_start, slots in _split_task_by_week(
+        start, end, rate, start_date, shifts_per_day
+    ).items():
         key = (week_start, stage, str(device), item)
         for idx, qty in enumerate(slots):
             rows[key][idx] += qty
 
 
-def _collect_visual_rows(result_file, demo_file, aps_file, start_date, department="210车间"):
+def _collect_visual_rows(
+    result_file,
+    demo_file,
+    aps_file,
+    start_date,
+    department="210车间",
+    shifts_per_day=2,
+):
     (
         I, J1, J2, J3, J4, B, p1, p2, p3, p4, _p5, _d, _T, _w,
         _stage_staff_limits, _clear_time_matrices, _machine_available_time,
         _release_time, _max_continuous_run,
-    ) = build_schedule_inputs(demo_file, aps_file, department=department)
+    ) = build_schedule_inputs(
+        demo_file,
+        aps_file,
+        department=department,
+        shifts_per_day=shifts_per_day,
+    )
 
     rates = _build_stage_rates(aps_file, I)
     metadata = _build_item_metadata(demo_file, set(I), department=department)
     durations = {1: p1, 2: p2, 3: p3, 4: p4}
-    rows = defaultdict(lambda: [0.0] * 14)
+    rows = defaultdict(lambda: [0.0] * (7 * shifts_per_day))
 
     batch_df = pd.read_excel(result_file, sheet_name="批次工序计划")
     pack_df = pd.read_excel(result_file, sheet_name="包装及摘要")
@@ -280,8 +320,18 @@ def _collect_visual_rows(result_file, demo_file, aps_file, start_date, departmen
             rate = rates[stage].get(item, 0.0)
             if duration <= 0 or rate <= 0:
                 continue
-            end = _add_working_duration(start, duration, start_date)
-            _add_quantity(rows, stage, str(device).strip(), item, start, end, rate, start_date)
+            end = _add_working_duration(start, duration, start_date, shifts_per_day)
+            _add_quantity(
+                rows,
+                stage,
+                str(device).strip(),
+                item,
+                start,
+                end,
+                rate,
+                start_date,
+                shifts_per_day,
+            )
 
     pack_start = {
         row["药品规格"]: (row["分装铝塑设备"], _safe_float(row["包装开工(班时)"], None))
@@ -300,8 +350,18 @@ def _collect_visual_rows(result_file, demo_file, aps_file, start_date, departmen
             continue
         start = start0
         for idx, _batch in enumerate(B[item]):
-            end = _add_working_duration(start, duration, start_date)
-            _add_quantity(rows, 4, device, item, start, end, rate, start_date)
+            end = _add_working_duration(start, duration, start_date, shifts_per_day)
+            _add_quantity(
+                rows,
+                4,
+                device,
+                item,
+                start,
+                end,
+                rate,
+                start_date,
+                shifts_per_day,
+            )
             start = end
 
     return rows, metadata
@@ -311,31 +371,11 @@ def _week_no_sunday_based(week_start):
     return int(week_start.strftime("%U")) + 1
 
 
-def _earliest_slot_index(slots):
-    """返回本周行数据中最早有产量的班次下标，用于按时间正序排序。"""
-    for idx, qty in enumerate(slots):
-        if qty > 1e-9:
-            return idx
-    return len(slots)
-
-
-def _sort_block_rows_by_time(block_rows):
-    """按最早排产班次正序；同班次再按设备、品种稳定排序。"""
-    return sorted(
-        block_rows,
-        key=lambda item: (_earliest_slot_index(item[2]), str(item[0]), str(item[1])),
-    )
-
-
-def _write_stage_section_title(ws, row, stage):
-    title = STAGE_CONFIG[stage]["title"]
-    cell = ws.cell(row, 1, title)
-    cell.font = Font(bold=True, size=14, color="003366")
-    ws.row_dimensions[row].height = 28
-    return row + 2
-
-
-def _write_block(ws, row, week_start, stage, block_rows, metadata, department="210车间"):
+def _write_block(
+    ws, row, week_start, stage, block_rows, metadata,
+    department="210车间", shifts_per_day=2,
+):
+    shifts_per_day = _validate_shifts_per_day(shifts_per_day)
     cyan = PatternFill("solid", fgColor="00FFFF")
     yellow = PatternFill("solid", fgColor="FFFF00")
     thin = Side(style="thin", color="808080")
@@ -352,11 +392,11 @@ def _write_block(ws, row, week_start, stage, block_rows, metadata, department="2
     date_row = row + 1
     header_row = row + 2
     for day_idx in range(7):
-        col = 7 + day_idx * 2
+        col = 7 + day_idx * shifts_per_day
         ws.cell(date_row, col, (week_start + timedelta(days=day_idx)).strftime("%Y.%m.%d"))
         ws.cell(date_row, col).fill = cyan
 
-    for col_idx, title in enumerate(HEADER, start=1):
+    for col_idx, title in enumerate(_build_header(shifts_per_day), start=1):
         cell = ws.cell(header_row, col_idx, title)
         cell.fill = cyan
         cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -391,10 +431,11 @@ def _write_block(ws, row, week_start, stage, block_rows, metadata, department="2
             else:
                 ws.cell(current_row, 7 + idx).border = border
 
-        ws.cell(current_row, 21, _clean_number(total))
-        ws.cell(current_row, 22, info.get("销售计划量"))
-        ws.cell(current_row, 23, None)
-        for col_idx in (21, 22, 23):
+        total_col = 7 + 7 * shifts_per_day
+        ws.cell(current_row, total_col, _clean_number(total))
+        ws.cell(current_row, total_col + 1, info.get("销售计划量"))
+        ws.cell(current_row, total_col + 2, None)
+        for col_idx in (total_col, total_col + 1, total_col + 2):
             ws.cell(current_row, col_idx).border = border
             ws.cell(current_row, col_idx).alignment = Alignment(horizontal="center", vertical="center")
         current_row += 1
@@ -403,16 +444,17 @@ def _write_block(ws, row, week_start, stage, block_rows, metadata, department="2
     ws.cell(summary_row, 6, "计划汇总：")
     ws.cell(summary_row, 6).font = Font(bold=True)
     ws.cell(summary_row, 6).alignment = Alignment(horizontal="center", vertical="center")
-    for slot_idx in range(14):
+    for slot_idx in range(7 * shifts_per_day):
         col = 7 + slot_idx
         total = sum(slots[slot_idx] for _device, _item, slots in block_rows)
         ws.cell(summary_row, col, _clean_number(total))
         ws.cell(summary_row, col).font = Font(bold=True)
         ws.cell(summary_row, col).alignment = Alignment(horizontal="center", vertical="center")
-    ws.cell(summary_row, 21, _clean_number(sum(sum(slots) for _device, _item, slots in block_rows)))
-    ws.cell(summary_row, 21).font = Font(bold=True)
+    total_col = 7 + 7 * shifts_per_day
+    ws.cell(summary_row, total_col, _clean_number(sum(sum(slots) for _device, _item, slots in block_rows)))
+    ws.cell(summary_row, total_col).font = Font(bold=True)
 
-    for col in range(1, 24):
+    for col in range(1, total_col + 3):
         ws.cell(summary_row, col).border = border
     return summary_row + 2
 
@@ -424,8 +466,17 @@ def generate_template_schedule_board(
     output_file,
     start_date=datetime(2026, 7, 1),
     department="210车间",
+    shifts_per_day=2,
 ):
-    rows, metadata = _collect_visual_rows(result_file, demo_file, aps_file, start_date, department=department)
+    shifts_per_day = _validate_shifts_per_day(shifts_per_day)
+    rows, metadata = _collect_visual_rows(
+        result_file,
+        demo_file,
+        aps_file,
+        start_date,
+        department=department,
+        shifts_per_day=shifts_per_day,
+    )
     wb = Workbook()
     ws = wb.active
     ws.title = department
@@ -433,31 +484,34 @@ def generate_template_schedule_board(
 
     widths = {
         "A": 13, "B": 13, "C": 32, "D": 24, "E": 20, "F": 10,
-        "U": 12, "V": 12, "W": 16,
     }
-    for col in range(7, 21):
+    for col in range(7, 7 + 7 * shifts_per_day):
         widths[get_column_letter(col)] = 12
+    total_col = 7 + 7 * shifts_per_day
+    widths[get_column_letter(total_col)] = 12
+    widths[get_column_letter(total_col + 1)] = 12
+    widths[get_column_letter(total_col + 2)] = 16
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
 
     all_weeks = sorted({key[0] for key in rows})
     row = 1
-    # 四大板块：配料 → 压片 → 包衣 → 铝塑包装；板块内按周、按时间正序
-    for stage in (1, 2, 3, 4):
-        stage_weeks = []
-        for week_start in all_weeks:
+    for week_start in all_weeks:
+        for stage in (1, 2, 3, 4):
             block_rows = []
             for (wk, st, device, item), slots in rows.items():
                 if wk == week_start and st == stage and any(q > 1e-9 for q in slots):
                     block_rows.append((device, item, slots))
-            if block_rows:
-                stage_weeks.append((week_start, _sort_block_rows_by_time(block_rows)))
-        if not stage_weeks:
-            continue
-        row = _write_stage_section_title(ws, row, stage)
-        for week_start, block_rows in stage_weeks:
+            block_rows.sort(key=lambda x: (str(x[0]), str(x[1])))
             row = _write_block(
-                ws, row, week_start, stage, block_rows, metadata, department=department,
+                ws,
+                row,
+                week_start,
+                stage,
+                block_rows,
+                metadata,
+                department=department,
+                shifts_per_day=shifts_per_day,
             )
 
     for rows_cells in ws.iter_rows():
@@ -473,11 +527,27 @@ def generate_template_schedule_board(
     return str(output_file)
 
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description="Generate weekly schedule visualization workbook.")
+    parser.add_argument("--result", default="排产结果明细_packclear_sundayrest.xlsx")
+    parser.add_argument("--demo", default="./输入/demo2.xlsx")
+    parser.add_argument("--aps", default="./输入/副本APS排产信息-4.30.xlsx")
+    parser.add_argument("--output", default="可排产结果可视化.xlsx")
+    parser.add_argument("--start-date", default="2026-07-01")
+    parser.add_argument("--department", default="210车间")
+    parser.add_argument("--shifts-per-day", type=int, default=2)
+    args = parser.parse_args()
+
     generate_template_schedule_board(
-        "排产结果明细_packclear_sundayrest.xlsx",
-        "./输入/demo2.xlsx",
-        "./输入/副本APS排产信息-4.30.xlsx",
-        "可排产结果可视化.xlsx",
-        datetime(2026, 7, 1),
+        args.result,
+        args.demo,
+        args.aps,
+        args.output,
+        datetime.strptime(args.start_date, "%Y-%m-%d"),
+        department=args.department,
+        shifts_per_day=args.shifts_per_day,
     )
+
+
+if __name__ == "__main__":
+    main()
