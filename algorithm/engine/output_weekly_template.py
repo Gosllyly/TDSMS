@@ -371,6 +371,21 @@ def _week_no_sunday_based(week_start):
     return int(week_start.strftime("%U")) + 1
 
 
+def _first_active_slot(slots):
+    for idx, qty in enumerate(slots):
+        if qty > 1e-9:
+            return idx
+    return len(slots)
+
+
+def _write_stage_section_header(ws, row, stage, department="210车间"):
+    title = STAGE_CONFIG[stage]["title"]
+    cell = ws.cell(row, 1, f"{department} · {title}")
+    cell.font = Font(bold=True, size=14)
+    ws.row_dimensions[row].height = 28
+    return row + 2
+
+
 def _write_block(
     ws, row, week_start, stage, block_rows, metadata,
     department="210车间", shifts_per_day=2,
@@ -496,13 +511,27 @@ def generate_template_schedule_board(
 
     all_weeks = sorted({key[0] for key in rows})
     row = 1
-    for week_start in all_weeks:
-        for stage in (1, 2, 3, 4):
+    # 四大板块：配料 / 压片 / 包衣 / 铝塑；板块内按周、开工时间正序。
+    for stage in (1, 2, 3, 4):
+        stage_weeks = [
+            week_start
+            for week_start in all_weeks
+            if any(
+                wk == week_start and st == stage and any(q > 1e-9 for q in slots)
+                for (wk, st, _device, _item), slots in rows.items()
+            )
+        ]
+        if not stage_weeks:
+            continue
+        row = _write_stage_section_header(ws, row, stage, department=department)
+        for week_start in stage_weeks:
             block_rows = []
             for (wk, st, device, item), slots in rows.items():
                 if wk == week_start and st == stage and any(q > 1e-9 for q in slots):
                     block_rows.append((device, item, slots))
-            block_rows.sort(key=lambda x: (str(x[0]), str(x[1])))
+            block_rows.sort(
+                key=lambda x: (_first_active_slot(x[2]), str(x[0]), str(x[1]))
+            )
             row = _write_block(
                 ws,
                 row,

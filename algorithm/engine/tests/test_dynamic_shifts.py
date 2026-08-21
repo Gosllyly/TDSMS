@@ -1,5 +1,7 @@
 from datetime import datetime
+from pathlib import Path
 from unittest import mock
+import tempfile
 import unittest
 
 import pandas as pd
@@ -175,6 +177,78 @@ class DynamicShiftConversionTests(unittest.TestCase):
 
         self.assertEqual(generator.call_args.kwargs["shifts_per_day"], 3)
         self.assertEqual(generator.call_args.kwargs["department"], "210车间")
+
+    def test_board_groups_by_stage_and_sorts_rows_by_start_time(self):
+        import output_weekly_template
+        from output_weekly_template import generate_template_schedule_board
+
+        week1 = datetime(2026, 7, 5)
+        week2 = datetime(2026, 7, 12)
+        slots_late = [0.0] * 14
+        slots_late[5] = 10.0
+        slots_early = [0.0] * 14
+        slots_early[1] = 8.0
+        slots_week2 = [0.0] * 14
+        slots_week2[0] = 6.0
+
+        rows = {
+            (week2, 1, "B线", "item-b"): slots_week2,
+            (week1, 1, "Z线", "item-late"): slots_late,
+            (week1, 1, "A线", "item-early"): slots_early,
+            (week1, 2, "压片1", "item-press"): slots_early,
+        }
+        metadata = {
+            "item-b": {"产品代码": "B", "品名": "B药", "包装规格": "盒", "销售计划量": 1},
+            "item-late": {"产品代码": "L", "品名": "L药", "包装规格": "盒", "销售计划量": 1},
+            "item-early": {"产品代码": "E", "品名": "E药", "包装规格": "盒", "销售计划量": 1},
+            "item-press": {"产品代码": "P", "品名": "P药", "包装规格": "盒", "销售计划量": 1},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "board.xlsx"
+            with mock.patch.object(
+                output_weekly_template,
+                "_collect_visual_rows",
+                return_value=(rows, metadata),
+            ), mock.patch.object(
+                output_weekly_template,
+                "get_mix_spec",
+                return_value="规格",
+            ):
+                generate_template_schedule_board(
+                    "result.xlsx",
+                    "demo.xlsx",
+                    "aps.xlsx",
+                    output,
+                    start_date=datetime(2026, 7, 1),
+                )
+
+            from openpyxl import load_workbook
+
+            ws = load_workbook(output).active
+            texts = [ws.cell(r, 1).value for r in range(1, ws.max_row + 1) if ws.cell(r, 1).value]
+            stage_headers = [t for t in texts if "·" in str(t)]
+            self.assertEqual(
+                stage_headers,
+                ["210车间 · 配料计划", "210车间 · 压片计划"],
+            )
+            mix_header_row = next(
+                r for r in range(1, ws.max_row + 1)
+                if ws.cell(r, 1).value == "210车间 · 配料计划"
+            )
+            press_header_row = next(
+                r for r in range(1, ws.max_row + 1)
+                if ws.cell(r, 1).value == "210车间 · 压片计划"
+            )
+            self.assertLess(mix_header_row, press_header_row)
+
+            # 配料板块内：先 week1（early 再 late），再 week2
+            devices = [
+                ws.cell(r, 1).value
+                for r in range(mix_header_row + 1, press_header_row)
+                if ws.cell(r, 1).value in {"A线", "Z线", "B线"}
+            ]
+            self.assertEqual(devices, ["A线", "Z线", "B线"])
 
     def test_sunday_postprocess_passes_shifts_per_day_to_input_builder(self):
         from postprocess_sunday_calendar import postprocess_detail_for_sundays
