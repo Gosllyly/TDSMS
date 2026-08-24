@@ -13,7 +13,7 @@ class ExcelValidationError(ValueError):
     pass
 
 
-APS_TEMPLATE_FILENAME = "APS排产信息模板.xlsx"
+APS_TEMPLATE_FILENAME = "APS排程信息模板.xlsx"
 PLAN_TEMPLATE_FILENAME = "药业车间分解编排计划模板.xlsx"
 
 

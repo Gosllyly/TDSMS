@@ -64,7 +64,7 @@ class ApiIntegrationTests(APITestCase):
 
     def create_archive(self):
         self.login()
-        template = Path(settings.MEDIA_ROOT) / "templates" / "APS排产信息模板.xlsx"
+        template = Path(settings.MEDIA_ROOT) / "templates" / "APS排程信息模板.xlsx"
         with template.open("rb") as stream:
             response = self.client.post("/tdsms/aps/create", {"archiveName": "方案一", "file": stream}, format="multipart")
         self.assertEqual(response.status_code, 200, response.data)
@@ -209,7 +209,7 @@ class ApiIntegrationTests(APITestCase):
     def test_template_downloads(self):
         self.login()
         cases = [
-            ("/tdsms/aps/template", "APS排产信息模板.xlsx"),
+            ("/tdsms/aps/template", "APS排程信息模板.xlsx"),
             ("/tdsms/task/template", "药业车间分解编排计划表模板.xlsx"),
         ]
         for url, filename in cases:
