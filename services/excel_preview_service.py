@@ -13,6 +13,9 @@ from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
 
+# 缓存版本：样式/结构变更时递增，避免继续命中旧预览文件
+_PREVIEW_CACHE_VERSION = "v2"
+
 _gen_locks: dict[str, threading.Lock] = {}
 _gen_locks_guard = threading.Lock()
 
@@ -37,15 +40,16 @@ class _StyleRegistry:
         return name
 
     def css_block(self) -> str:
-        return "\n".join(f".{name}{{{css}}}" for name, css in self._rules)
+        # 使用 td.cN，保证优先级高于 table.sheet td 默认规则
+        return "\n".join(f"td.{name}{{{css}}}" for name, css in self._rules)
 
 
 def resolve_preview_path(excel_path: Path) -> Path:
-    return excel_path.with_name(f"{excel_path.stem}.preview.html")
+    return excel_path.with_name(f"{excel_path.stem}.preview.{_PREVIEW_CACHE_VERSION}.html")
 
 
 def resolve_preview_gzip_path(excel_path: Path) -> Path:
-    return excel_path.with_name(f"{excel_path.stem}.preview.html.gz")
+    return excel_path.with_name(f"{excel_path.stem}.preview.{_PREVIEW_CACHE_VERSION}.html.gz")
 
 
 def _cache_valid(source: Path, target: Path) -> bool:
@@ -323,36 +327,43 @@ def _render_sheet_html(ws, styles: _StyleRegistry) -> str:
     ]
 
     rows_html: list[str] = []
-    for r, row in enumerate(ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col), start=1):
+    append_row = rows_html.append
+    for r, row in enumerate(
+        ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col), start=1
+    ):
         height = _row_height_px(ws, r)
         cells: list[str] = []
+        append_cell = cells.append
         for c, cell in enumerate(row, start=1):
-            if (r, c) in merge_map and merge_map[(r, c)] is None:
+            if merge_map.get((r, c)) is None and (r, c) in merge_map:
                 continue
             css_class = styles.class_for(_cell_style_css(cell))
-            attrs = [f'class="{css_class}"']
             span = merge_map.get((r, c))
             if span:
                 rowspan, colspan = span
+                span_attrs = ""
                 if rowspan > 1:
-                    attrs.append(f'rowspan="{rowspan}"')
+                    span_attrs += f' rowspan="{rowspan}"'
                 if colspan > 1:
-                    attrs.append(f'colspan="{colspan}"')
-            cells.append(f"<td {' '.join(attrs)}>{_cell_value_html(cell.value)}</td>")
-        rows_html.append(f'<tr style="height:{height}px">{"".join(cells)}</tr>')
+                    span_attrs += f' colspan="{colspan}"'
+                append_cell(
+                    f'<td class="{css_class}"{span_attrs}>{_cell_value_html(cell.value)}</td>'
+                )
+            else:
+                append_cell(
+                    f'<td class="{css_class}">{_cell_value_html(cell.value)}</td>'
+                )
+        append_row(f'<tr style="height:{height}px">{"".join(cells)}</tr>')
 
     sheet_name = html.escape(ws.title)
-    return f"""
-    <div class="sheet-wrap">
-      <div class="sheet-title">{sheet_name}</div>
-      <table class="sheet">
-        <colgroup>{''.join(col_group)}</colgroup>
-        <tbody>
-          {''.join(rows_html)}
-        </tbody>
-      </table>
-    </div>
-    """
+    return (
+        f'<div class="sheet-wrap">'
+        f'<div class="sheet-title">{sheet_name}</div>'
+        f'<table class="sheet">'
+        f'<colgroup>{"".join(col_group)}</colgroup>'
+        f"<tbody>{''.join(rows_html)}</tbody>"
+        f"</table></div>"
+    )
 
 
 def _render_workbook_html(source: Path) -> str:
@@ -413,8 +424,6 @@ def _render_workbook_html(source: Path) -> str:
     white-space: nowrap;
     overflow: hidden;
     vertical-align: middle;
-    background: #fff;
-    border: none;
   }}
   .sheet-title {{
     padding: 8px 10px;
