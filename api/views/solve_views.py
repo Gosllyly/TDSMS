@@ -13,9 +13,10 @@ from algorithm.adapter import (
     sync_solve_task,
 )
 from api.serializers import SolveMatchCheckSerializer, SolveStartSerializer
-from api.utils import ApiResponse, attachment_file_response, get_request_params
+from api.utils import ApiResponse, attachment_file_response, get_request_params, inline_file_response
 from api.views.common import format_datetime
 from core.models import SolveTask, TaskImportRecord
+from services.excel_preview_service import ExcelPreviewError, open_preview_for_response
 from services.solve_match_service import match_check_data
 
 
@@ -24,6 +25,16 @@ def get_owned_solve(user, solve_id):
     if not task:
         raise NotFound("求解任务不存在")
     return task
+
+
+def solve_result_address(solve):
+    result_path = (solve.resultFilePath or "").strip()
+    if result_path:
+        return result_path
+    partial_path = (solve.partialResultFilePath or "").strip()
+    if partial_path:
+        return partial_path
+    return None
 
 
 def solve_data(solve, algorithm_state=None):
@@ -179,6 +190,43 @@ class SolveStopView(APIView):
             status=status.HTTP_202_ACCEPTED,
             message=message,
         )
+
+
+class SolvePdfView(APIView):
+    def get(self, request):
+        solve_id = get_request_params(request).get("solveTaskId")
+        if not solve_id:
+            raise ValidationError("solveTaskId不能为空")
+        solve = get_owned_solve(request.user, solve_id)
+        address = solve_result_address(solve)
+        if not address:
+            return ApiResponse(
+                status=status.HTTP_409_CONFLICT,
+                message="当前任务尚未生成可预览的排程结果",
+            )
+        source = Path(address)
+        if not source.is_file():
+            return ApiResponse(
+                status=status.HTTP_409_CONFLICT,
+                message="结果文件不存在",
+            )
+        try:
+            accept_gzip = "gzip" in request.META.get("HTTP_ACCEPT_ENCODING", "")
+            preview_path, gzipped = open_preview_for_response(source, accept_gzip=accept_gzip)
+        except ExcelPreviewError as exc:
+            return ApiResponse(
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                message=str(exc),
+            )
+        response = inline_file_response(
+            open(preview_path, "rb"),
+            "可排产结果可视化.html",
+            content_type="text/html; charset=utf-8",
+        )
+        if gzipped:
+            response["Content-Encoding"] = "gzip"
+            response["Vary"] = "Accept-Encoding"
+        return response
 
 
 class SolveResultView(APIView):

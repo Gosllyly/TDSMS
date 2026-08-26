@@ -8,7 +8,8 @@ from api.views.auth_views import (
     AdminCreateView, AdminExpireUpdateView, AdminQueryView, AdminStatusUpdateView, LoginView, LogoutView,
 )
 from api.views.solve_views import (
-    SolveLogsView, SolveMatchCheckView, SolveQueryView, SolveResultView, SolveStartView, SolveStopView,
+    SolveLogsView, SolveMatchCheckView, SolvePdfView, SolveQueryView, SolveResultView, SolveStartView,
+    SolveStopView,
 )
 from api.views.task_views import (
     TaskDeleteView, TaskDetailFilterOptionsView, TaskDetailView, TaskHistoryImportView, TaskHistoryView,
@@ -40,6 +41,7 @@ urlpatterns = [
     path("solve/query", SolveQueryView.as_view()),
     path("solve/logs", SolveLogsView.as_view()),
     path("solve/stop", SolveStopView.as_view()),
+    path("solve/pdf", SolvePdfView.as_view()),
     path("solve/result", SolveResultView.as_view()),
     path("admin/create", AdminCreateView.as_view()),
     path("admin/query", AdminQueryView.as_view()),

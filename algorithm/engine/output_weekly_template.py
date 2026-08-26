@@ -10,6 +10,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.page import PageMargins
 
 from input_data import build_schedule_inputs, get_mix_spec, read_aps_table, split_drug_item
 
@@ -474,6 +475,22 @@ def _write_block(
     return summary_row + 2
 
 
+def _configure_print_setup(ws, shifts_per_day):
+    """横向分页打印：宽表按实际列宽铺开，避免 PDF 被压成窄条。"""
+    shifts_per_day = _validate_shifts_per_day(shifts_per_day)
+    max_col = 7 + 7 * shifts_per_day + 3
+    max_row = ws.max_row
+    ws.print_area = f"A1:{get_column_letter(max_col)}{max_row}"
+    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_margins = PageMargins(left=0.2, right=0.2, top=0.3, bottom=0.3, header=0.2, footer=0.2)
+    # 不按页宽压缩，保持与 Excel 中相近的列宽比例
+    ws.sheet_properties.pageSetUpPr.fitToPage = False
+    ws.page_setup.fitToWidth = None
+    ws.page_setup.fitToHeight = None
+    ws.page_setup.scale = 100
+
+
 def generate_template_schedule_board(
     result_file,
     demo_file,
@@ -542,6 +559,8 @@ def generate_template_schedule_board(
                 department=department,
                 shifts_per_day=shifts_per_day,
             )
+
+    _configure_print_setup(ws, shifts_per_day)
 
     for rows_cells in ws.iter_rows():
         for cell in rows_cells:

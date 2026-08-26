@@ -7,14 +7,22 @@ from rest_framework.response import Response
 from rest_framework import status as drf_status
 
 
-def attachment_content_disposition(filename: str) -> str:
+def _content_disposition(disposition: str, filename: str) -> str:
     """
-    同时提供 filename 与 filename*，保证中文下载名正确。
+    同时提供 filename 与 filename*，保证中文文件名正确。
     - filename= 使用百分号编码（无 utf-8'' 前缀），避免出现「utf-8药业...」
     - filename*=UTF-8''... 供标准浏览器解析出原始中文名
     """
     encoded = quote(filename, safe="")
-    return f"attachment; filename=\"{encoded}\"; filename*=UTF-8''{encoded}"
+    return f"{disposition}; filename=\"{encoded}\"; filename*=UTF-8''{encoded}"
+
+
+def attachment_content_disposition(filename: str) -> str:
+    return _content_disposition("attachment", filename)
+
+
+def inline_content_disposition(filename: str) -> str:
+    return _content_disposition("inline", filename)
 
 
 def attachment_file_response(fileobj, filename: str, content_type: Optional[str] = None) -> FileResponse:
@@ -25,6 +33,16 @@ def attachment_file_response(fileobj, filename: str, content_type: Optional[str]
     response = FileResponse(fileobj, **kwargs)
     # 不传 filename 给 FileResponse，避免 Django 覆盖 Content-Disposition
     response["Content-Disposition"] = attachment_content_disposition(filename)
+    return response
+
+
+def inline_file_response(fileobj, filename: str, content_type: Optional[str] = None) -> FileResponse:
+    """返回可供浏览器内嵌预览的文件响应（Content-Disposition: inline）。"""
+    kwargs = {"as_attachment": False}
+    if content_type:
+        kwargs["content_type"] = content_type
+    response = FileResponse(fileobj, **kwargs)
+    response["Content-Disposition"] = inline_content_disposition(filename)
     return response
 
 

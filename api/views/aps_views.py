@@ -127,6 +127,16 @@ class ApsCreateView(APIView):
         name = (request.data.get("archiveName") or "").strip()
         uploaded = request.FILES.get("file")
         archive_id = request.data.get("archiveId")
+        has_remark = "remark" in request.data
+        remark = None
+        if has_remark:
+            raw_remark = request.data.get("remark")
+            if raw_remark in ("", None):
+                remark = None
+            else:
+                remark = str(raw_remark).strip() or None
+                if remark and len(remark) > 500:
+                    raise ValidationError("备注长度不能超过500")
         if archive_id in ("", None, []):
             archive_id = None
         else:
@@ -163,10 +173,17 @@ class ApsCreateView(APIView):
                 # 逻辑删除旧明细，再用新文档数据替换
                 ApsArchiveItem.objects.filter(archive=archive).update(isDeleted=1)
                 archive.archiveName = name
-                archive.save(update_fields=["archiveName", "updateTime"])
+                update_fields = ["archiveName", "updateTime"]
+                if has_remark:
+                    archive.remark = remark
+                    update_fields.append("remark")
+                archive.save(update_fields=update_fields)
                 message = "APS方案替换成功"
             else:
-                archive = ApsArchive.objects.create(archiveName=name, createdBy=request.user)
+                create_kwargs = {"archiveName": name, "createdBy": request.user}
+                if has_remark:
+                    create_kwargs["remark"] = remark
+                archive = ApsArchive.objects.create(**create_kwargs)
                 message = "APS方案导入成功"
             ApsArchiveItem.objects.bulk_create(
                 [ApsArchiveItem(archive=archive, **row) for row in rows],
@@ -175,6 +192,7 @@ class ApsCreateView(APIView):
         return ApiResponse({
             "archiveId": archive.archiveId,
             "archiveName": archive.archiveName,
+            "remark": archive.remark,
             "dataCount": len(rows),
             "createTime": format_datetime(archive.createTime),
         }, message=message)

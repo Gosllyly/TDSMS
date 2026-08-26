@@ -21,6 +21,7 @@ from django.utils import timezone
 
 from core.models import SolveTask
 from services.aps_export_service import export_aps_archive
+from services.excel_preview_service import schedule_excel_to_preview
 
 
 ENGINE_STATUS_TO_DB = {
@@ -199,18 +200,24 @@ def sync_solve_task(solve_or_id, cleanup=True):
 
     visual_path = (state.get("resultFiles") or {}).get("visualBoard")
     visual = Path(visual_path) if visual_path else None
+    preview_source = None
     if visual and visual.is_file():
         kind = state.get("resultKind")
         status = state.get("status")
         if status == "SUCCESS" or kind == "final":
             solve.resultFilePath = str(visual)
+            preview_source = visual
         if status == "STOPPED" or kind == "partial":
             solve.partialResultFilePath = str(visual)
+            preview_source = visual
 
     solve.save(update_fields=[
         "solveStatus", "startTime", "finishTime", "finishReason",
         "resultFilePath", "partialResultFilePath",
     ])
+    if preview_source is not None:
+        # 结果落盘后立刻后台预生成 HTML 预览，避免用户点预览时再等转换
+        schedule_excel_to_preview(preview_source)
     if cleanup and _is_finished_state(state):
         _cleanup_finished_files(solve.solveTaskId, state)
     return solve, state
