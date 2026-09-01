@@ -2,6 +2,7 @@ import json
 import shutil
 import tempfile
 from datetime import timedelta
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import unquote
@@ -251,6 +252,33 @@ class ApiIntegrationTests(APITestCase):
             specification="100mg*100片",
             monthlyProductionPlan=200,
         )
+        UploadFileItem.objects.create(
+            file=task.file,
+            departmentName="101车间",
+            materialCode="MAT-003",
+            inventoryName="布洛芬片",
+            specification="0.2g*20片",
+            # 库内存精确 4 位小数；前端 JSON 数字会变成 float，易触发精度问题
+            monthlyProductionPlan=Decimal("6333.3333"),
+        )
+
+        # JSON float 6333.3333 不得因精度误差漏掉对应存货名称
+        float_plan_options = self.client.post(
+            "/tdsms/task/detailFilterOptions",
+            {
+                "taskId": task.taskId,
+                "option": "inventoryNames",
+                "departmentNames": ["101车间", "302车间", "303车间"],
+                "monthlyProductionPlans": [100, 200, 6333.3333],
+                "inventoryNames": [],
+            },
+            format="json",
+        )
+        self.assertEqual(float_plan_options.status_code, 200, float_plan_options.data)
+        self.assertEqual(
+            set(float_plan_options.data["data"]),
+            {"阿司匹林片", "维生素C片", "布洛芬片"},
+        )
 
         payload = {
             "taskId": task.taskId,
@@ -310,7 +338,7 @@ class ApiIntegrationTests(APITestCase):
             format="json",
         )
         self.assertEqual(options.status_code, 200, options.data)
-        self.assertEqual(options.data["data"], ["302车间", "303车间"])
+        self.assertEqual(options.data["data"], ["101车间", "302车间", "303车间"])
 
         linked = self.client.post(
             "/tdsms/task/detailFilterOptions",

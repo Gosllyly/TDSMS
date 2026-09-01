@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 from django.conf import settings
@@ -50,6 +51,8 @@ PLAN_FILTER_FIELDS = {
 
 PLAN_BLANKABLE_CHAR_FIELDS = {"departmentName", "inventoryName"}
 _NULL_TOKENS = {"null", "none", "undefined"}
+# 与 UploadFileItem.monthlyProductionPlan(decimal_places=4) 对齐
+_PLAN_DECIMAL_QUANT = Decimal("0.0001")
 
 
 def _is_blank_filter_value(value):
@@ -64,6 +67,32 @@ def _is_monthly_null_token(value):
     if isinstance(value, str) and value.strip().lower() in _NULL_TOKENS:
         return True
     return False
+
+
+def _normalize_monthly_plan_value(value):
+    """
+    将前端传入的产量计划值规范为 Decimal(4位小数)。
+
+    JSON 数字会先变成 float，例如 6333.3333；若直接 Decimal(float) 会变成
+    6333.333300000000...，与库中 Decimal('6333.3333') 对不上，导致 __in 漏筛。
+    必须先经 str(float) 再转 Decimal。
+    """
+    try:
+        if isinstance(value, bool):
+            raise InvalidOperation
+        if isinstance(value, Decimal):
+            decimal_value = value
+        elif isinstance(value, int):
+            decimal_value = Decimal(value)
+        elif isinstance(value, float):
+            decimal_value = Decimal(str(value))
+        elif isinstance(value, str):
+            decimal_value = Decimal(value.strip())
+        else:
+            raise InvalidOperation
+        return decimal_value.quantize(_PLAN_DECIMAL_QUANT, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, TypeError, ArithmeticError) as exc:
+        raise ValidationError("筛选条件格式不正确") from exc
 
 
 def _blank_field_condition(field_name):
@@ -99,7 +128,7 @@ def apply_plan_item_filters(queryset, params, skip_option=None):
                 if _is_monthly_null_token(value) or _is_blank_filter_value(value):
                     blank_requested = True
                     continue
-                concrete_values.append(value)
+                concrete_values.append(_normalize_monthly_plan_value(value))
             elif _is_blank_filter_value(value):
                 blank_requested = True
             else:
